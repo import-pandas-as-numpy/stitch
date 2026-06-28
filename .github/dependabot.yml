@@ -1,0 +1,45 @@
+version: 2
+
+updates:
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: "09:00"
+      timezone: America/New_York
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: deps
+      include: scope
+    labels:
+      - dependencies
+      - rust
+    groups:
+      rust-runtime:
+        dependency-type: production
+        patterns:
+          - "*"
+      rust-development:
+        dependency-type: development
+        patterns:
+          - "*"
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: "09:30"
+      timezone: America/New_York
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: deps
+      include: scope
+    labels:
+      - dependencies
+      - github-actions
+    groups:
+      github-actions:
+        patterns:
+          - "*"

@@ -4,6 +4,7 @@ Status: Draft
 Last updated: 2026-06-28
 
 GitHub Actions workflows live under `.github/workflows`.
+Dependabot configuration lives at `.github/dependabot.yml`.
 
 ## Security Posture
 
@@ -49,3 +50,14 @@ Local audit command:
 ```bash
 zizmor --persona pedantic .github/workflows
 ```
+
+## Dependency Updates
+
+`.github/dependabot.yml` runs weekly grouped update checks:
+
+1. Cargo runtime dependencies are grouped as `rust-runtime`.
+2. Cargo development dependencies are grouped as `rust-development`.
+3. GitHub Actions updates are grouped as `github-actions`.
+
+Grouped updates keep PR volume low while still letting CI, Clippy, tests,
+benchmark smoke coverage, Socket, and Zizmor evaluate each update set together.
