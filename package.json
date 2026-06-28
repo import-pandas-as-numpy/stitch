@@ -1,0 +1,9 @@
+{
+  "name": "stitch-docs",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "npm run docs:build",
+    "docs:build": "node site/build.mjs"
+  }
+}

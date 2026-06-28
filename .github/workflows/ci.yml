@@ -4,15 +4,23 @@ on:
   pull_request:
     paths-ignore:
       - "docs/**"
+      - "site/**"
       - "*.md"
       - "README*"
+      - "package.json"
+      - "package-lock.json"
+      - "vercel.json"
   push:
     branches:
       - main
     paths-ignore:
       - "docs/**"
+      - "site/**"
       - "*.md"
       - "README*"
+      - "package.json"
+      - "package-lock.json"
+      - "vercel.json"
   workflow_dispatch:
 
 permissions:

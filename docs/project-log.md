@@ -208,6 +208,9 @@ Verification:
 150. Added Dependabot grouped updates for Cargo runtime dependencies, Cargo development dependencies, and GitHub Actions.
 151. Configured CI to skip documentation-only changes while still running for code, tests, Cargo metadata, scripts, workflows, and Dependabot configuration.
 152. Changed input discovery so omitted input paths default to the current working directory, making commands like `stitch search -q 'event.id == 4625'` valid.
+153. Added a dependency-free static documentation website under `site/`, with a Vercel build configuration for publishing `site/dist` to `stitch.sudorem.dev`.
+154. Adapted the docs website styling from `site-v3`: dark navy security palette, neon green/cyan accents, shield favicon, glassy header, and docs-focused layout surfaces.
+155. Updated CI path filters so docs-site-only changes rely on Vercel builds and do not run Rust binary format, clippy, test, or benchmark jobs.
 
 ## 2026-06-27
 
