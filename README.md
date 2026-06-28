@@ -1,86 +1,100 @@
 # Stitch
 
-`stitch` is a CLI-first Rust tool for fast offline Windows Event Log (`.evtx`)
-analysis. It can search EVTX collections with an ad hoc query language, hunt
-with Sigma rules, run supported Sigma correlation rules, and dump EVTX records
-to stable machine formats.
+[![CI](https://github.com/import-pandas-as-numpy/stitch/actions/workflows/ci.yml/badge.svg)](https://github.com/import-pandas-as-numpy/stitch/actions/workflows/ci.yml)
+[![Security](https://github.com/import-pandas-as-numpy/stitch/actions/workflows/security.yml/badge.svg)](https://github.com/import-pandas-as-numpy/stitch/actions/workflows/security.yml)
+[![Rust](https://img.shields.io/badge/rust-stable-orange.svg)](https://www.rust-lang.org/)
+[![License](https://img.shields.io/badge/license-TBD-lightgrey.svg)](#status)
 
-The project is early, but the current implementation is usable against local
-EVTX fixtures and directories.
+Fast offline Windows Event Log analysis from the command line.
 
-## What It Does
+`stitch` searches EVTX collections, hunts with Sigma rules, runs supported
+Sigma correlation rules, and dumps records into machine-friendly formats. It is
+built for incident-response style workflows where speed, readable output, and
+source identity matter.
 
-- Searches EVTX files and recursive EVTX directories.
-- Runs Sigma rules directly against EVTX records.
-- Supports a practical Sigma subset, including selected correlation rule types.
-- Emits readable human output and stable JSONL/JSON/CSV machine output.
-- Uses Rayon for file-level parallelism where ordering and behavior are safe.
-- Preserves normalized event metadata plus raw event content for re-analysis.
+```text
+EVTX files/directories  ->  search | hunt | dump  ->  pretty tables, JSONL, JSON, CSV
+```
 
-## Install
+## Highlights
 
-Build from source:
+| Capability | Current Support |
+| --- | --- |
+| EVTX input | Single files, recursive directories, and `--paths-from` lists |
+| Search | STQL predicates over normalized metadata and raw event paths |
+| Hunt | Direct Sigma rule loading with Windows EVTX field aliases |
+| Correlation | Supported Sigma correlation windows with bounded state |
+| Output | Pretty analyst output plus JSONL, JSON, and projected CSV |
+| Speed | Rayon file-level parallelism where execution is order-safe |
+| CI/security | Pinned GitHub Actions, Zizmor audits, Socket, grouped Dependabot updates |
+
+## Quickstart
+
+Build:
 
 ```bash
 cargo build --release
 ```
 
-Run the local binary:
+Search an EVTX file:
 
 ```bash
-target/release/stitch --help
-```
-
-During development, use:
-
-```bash
-cargo run -- --help
-```
-
-## Commands
-
-### Search
-
-Run an ad hoc STQL query:
-
-```bash
-stitch search -i tests/fixtures/evtx/security-auth.evtx \
+target/release/stitch search \
+  -i tests/fixtures/evtx/security-auth.evtx \
   --query 'event.id == 4625' \
   --format jsonl
 ```
 
-Pretty output is the default. When no `| keep` pipeline or `--fields`
-projection is supplied, pretty search output includes the full raw event record
-as a YAML-like nested block.
+Hunt with Sigma rules:
 
-Projected search:
+```bash
+target/release/stitch hunt \
+  -i tests/fixtures/evtx/sysmon-activity.evtx \
+  --rules tests/fixtures/sigma \
+  --format jsonl
+```
+
+Dump projected CSV:
+
+```bash
+target/release/stitch dump \
+  -i tests/fixtures/evtx/security-auth.evtx \
+  --format csv \
+  --fields timestamp \
+  --fields event.id \
+  --fields computer \
+  --output /tmp/security.csv
+```
+
+## Commands
+
+### `search`
+
+Run ad hoc STQL queries against EVTX input.
 
 ```bash
 stitch search -i tests/fixtures/evtx/security-auth.evtx \
   --query 'event.id == 4625 | keep timestamp, event.id, computer, Event.EventData.TargetUserName'
 ```
 
-### Hunt
+Pretty output is the default. Without `| keep` or `--fields`, pretty search
+prints the full raw event record as a YAML-like nested block. Use `--format
+jsonl` for scripting.
 
-Run Sigma rules:
+### `hunt`
 
-```bash
-stitch hunt -i tests/fixtures/evtx/sysmon-activity.evtx \
-  --rules tests/fixtures/sigma \
-  --format jsonl
-```
-
-Pretty hunt output is tabular by default and includes timestamp, rule match,
-event ID/record ID, level, host, and a concise payload. Use `--full` to include
-expanded source columns and less-truncated payload content:
+Run Sigma detections directly against EVTX records.
 
 ```bash
 stitch hunt -i tests/fixtures/evtx/sysmon-activity.evtx \
-  --rules tests/fixtures/sigma/sysmon_powershell_network.yml \
-  --full
+  --rules tests/fixtures/sigma/sysmon_powershell_network.yml
 ```
 
-Correlation rules run through `hunt` when correlation is enabled and supported:
+Default hunt output is tabular and compact: timestamp, detection, event
+ID/record ID, level, host, and a concise payload. Add `--full` for source
+columns and less-truncated payload content.
+
+Correlation rules run through `hunt` when enabled and supported:
 
 ```bash
 stitch hunt -i tests/fixtures/correlation-evtx/sysmon-correlation.evtx \
@@ -92,53 +106,57 @@ stitch hunt -i tests/fixtures/correlation-evtx/sysmon-correlation.evtx \
 Correlation-enabled hunt is intentionally sequential because event-time
 watermarks and bounded state are order-sensitive.
 
-### Dump
+### `dump`
 
-Dump EVTX records as JSONL:
+Serialize EVTX records for downstream tooling.
 
 ```bash
 stitch dump -i tests/fixtures/evtx/security-auth.evtx
 ```
 
-Write projected CSV:
+Supported dump formats are JSONL, JSON, and projected CSV. CSV requires
+explicit fields to avoid expensive schema discovery:
 
 ```bash
 stitch dump -i tests/fixtures/evtx/security-auth.evtx \
   --format csv \
   --fields timestamp \
   --fields event.id \
-  --fields computer \
-  --output /tmp/security.csv
+  --fields computer
 ```
 
-`dump --format xml` is listed by the CLI enum but is intentionally unsupported
-right now. JSONL, JSON, and projected CSV are the supported dump formats.
+`dump --format xml` is visible in the CLI enum but intentionally unsupported
+right now.
 
-## Inputs
+## Input Model
 
 All primary commands support:
 
 - `-i, --input <PATH>` for EVTX files or directories.
 - `--paths-from <FILE>` for newline-delimited path lists.
 - Recursive directory discovery by default.
-- `--include <GLOB>` and `--exclude <GLOB>` path filtering.
+- `--include <GLOB>` and `--exclude <GLOB>` filtering.
 
-Source identity is retained in outputs through fields such as
-`source.file_path`, `source.collection_root`, `channel`, `computer`, and
-`record_id`.
+Source identity is retained in output:
 
-## Parallelism
+- `source.file_path`
+- `source.collection_root`
+- `channel`
+- `computer`
+- `record_id`
 
-`--jobs 0` is the default and uses Rayon's system-sized thread pool when the
-mode can parallelize safely. Use `--jobs 1` to force sequential processing.
+## Parallel Execution
 
-Parallelized paths:
+`--jobs 0` is the default and uses Rayon's system-sized worker pool where the
+mode can parallelize safely. Use `--jobs 1` for sequential execution.
+
+Parallelized:
 
 - `search` when `--limit` is not set.
 - `dump` for JSONL, JSON, and projected CSV.
 - Non-correlation `hunt`.
 
-Sequential paths:
+Sequential by design:
 
 - Single-file input.
 - Explicit `--jobs 1`.
@@ -147,18 +165,20 @@ Sequential paths:
 
 ## Documentation
 
-- [Project specification](docs/project-spec.md)
-- [STQL query language](docs/stql.md)
-- [Sigma support](docs/sigma.md)
-- [Output guide](docs/output.md)
-- [Dump behavior](docs/dump.md)
-- [Performance notes](docs/performance.md)
-- [CI/CD](docs/ci.md)
-- [Dependency review](docs/dependencies.md)
+| Topic | Link |
+| --- | --- |
+| Project goals and design | [docs/project-spec.md](docs/project-spec.md) |
+| STQL query language | [docs/stql.md](docs/stql.md) |
+| Sigma support | [docs/sigma.md](docs/sigma.md) |
+| Output examples | [docs/output.md](docs/output.md) |
+| Dump behavior | [docs/dump.md](docs/dump.md) |
+| Performance notes | [docs/performance.md](docs/performance.md) |
+| CI/CD | [docs/ci.md](docs/ci.md) |
+| Dependency review | [docs/dependencies.md](docs/dependencies.md) |
 
 ## Development
 
-Baseline checks:
+Strict local checks:
 
 ```bash
 cargo fmt --all -- --check
@@ -166,7 +186,7 @@ cargo clippy --all-targets --all-features -- -D warnings -W clippy::pedantic
 cargo test --all-targets --all-features
 ```
 
-Benchmark smoke and local fixture timing:
+Benchmark harness:
 
 ```bash
 scripts/bench-local.sh
@@ -180,6 +200,8 @@ zizmor --persona pedantic .github/workflows
 
 ## Status
 
-`stitch` is under active development. Current focus areas are correctness,
+`stitch` is under active development. The priority stack is correctness,
 performance on realistic EVTX collections, predictable memory use, readable CLI
 output, and practical Sigma behavior.
+
+License metadata has not been finalized yet.
