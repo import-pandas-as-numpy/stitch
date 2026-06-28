@@ -35,8 +35,11 @@ The current pinned actions are:
 4. `benchmark-smoke`: validates and smoke-runs the local benchmark harness.
 
 Documentation-only changes under `docs/**`, top-level Markdown files, and
-`README*` files skip the full CI workflow. Code, tests, Cargo metadata, scripts,
-workflows, and Dependabot configuration still run CI.
+`README*` files skip the full CI workflow. Static documentation site changes
+under `site/**`, `package.json`, `package-lock.json`, and `vercel.json` also
+skip the Rust binary CI jobs because Vercel owns the docs-site build and preview
+checks. Code, tests, Cargo metadata, scripts, workflows, and Dependabot
+configuration still run CI.
 
 Cargo cache reuse is limited to `~/.cargo/git` and `~/.cargo/registry`.
 `target/` is intentionally not cached because compiled build artifacts are
