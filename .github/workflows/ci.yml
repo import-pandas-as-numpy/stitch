@@ -2,9 +2,17 @@ name: CI
 
 on:
   pull_request:
+    paths-ignore:
+      - "docs/**"
+      - "*.md"
+      - "README*"
   push:
     branches:
       - main
+    paths-ignore:
+      - "docs/**"
+      - "*.md"
+      - "README*"
   workflow_dispatch:
 
 permissions:

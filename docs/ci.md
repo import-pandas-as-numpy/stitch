@@ -34,6 +34,10 @@ The current pinned actions are:
 3. `test`: restores Cargo registry/git cache, runs `cargo check`, then runs tests.
 4. `benchmark-smoke`: validates and smoke-runs the local benchmark harness.
 
+Documentation-only changes under `docs/**`, top-level Markdown files, and
+`README*` files skip the full CI workflow. Code, tests, Cargo metadata, scripts,
+workflows, and Dependabot configuration still run CI.
+
 Cargo cache reuse is limited to `~/.cargo/git` and `~/.cargo/registry`.
 `target/` is intentionally not cached because compiled build artifacts are
 larger, less portable across job shapes, and less attractive for a security-first
