@@ -3,7 +3,7 @@
 [![CI](https://github.com/import-pandas-as-numpy/stitch/actions/workflows/ci.yml/badge.svg)](https://github.com/import-pandas-as-numpy/stitch/actions/workflows/ci.yml)
 [![Security](https://github.com/import-pandas-as-numpy/stitch/actions/workflows/security.yml/badge.svg)](https://github.com/import-pandas-as-numpy/stitch/actions/workflows/security.yml)
 [![Rust](https://img.shields.io/badge/rust-stable-orange.svg)](https://www.rust-lang.org/)
-[![License](https://img.shields.io/badge/license-TBD-lightgrey.svg)](#status)
+[![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 
 Fast offline Windows Event Log analysis from the command line.
 
@@ -213,4 +213,4 @@ zizmor --persona pedantic .github/workflows
 performance on realistic EVTX collections, predictable memory use, readable CLI
 output, and practical Sigma behavior.
 
-License metadata has not been finalized yet.
+`stitch` is licensed under the [MIT License](LICENSE).

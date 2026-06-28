@@ -211,6 +211,7 @@ Verification:
 153. Added a dependency-free static documentation website under `site/`, with a Vercel build configuration for publishing `site/dist` to `stitch.sudorem.dev`.
 154. Adapted the docs website styling from `site-v3`: dark navy security palette, neon green/cyan accents, shield favicon, glassy header, and docs-focused layout surfaces.
 155. Updated CI path filters so docs-site-only changes rely on Vercel builds and do not run Rust binary format, clippy, test, or benchmark jobs.
+156. Set the project license to MIT with a top-level `LICENSE`, Cargo package metadata, and README badge/status updates.
 
 ## 2026-06-27
 
