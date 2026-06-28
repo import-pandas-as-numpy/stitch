@@ -24,6 +24,32 @@ Skipped:
 
 Unsupported rule shapes fail at load time with the rule path and a diagnostic.
 
+During rule loading, `stitch` builds conservative metadata prefilters for
+required `and`/`all of` predicates on normalized fields such as event ID,
+channel, provider, timestamp, and computer. `or`, `not`, and multi-alternative
+selection branches are not extracted because they are not globally required.
+Windows `logsource.service` values for common channels such as Security, System,
+Sysmon, PowerShell, Defender, WMI Activity, and Task Scheduler also compile into
+channel prefilters. Unknown services are left unfiltered.
+Hunt evaluation also reuses a per-event Sigma context so keyword rules can share
+one cached raw-event string across all rule checks for that event.
+
+## Human Output
+
+Pretty `hunt` output uses Chainsaw-inspired Unicode tables. Single-event matches
+include timestamp, detections, event ID/record ID, level, host, and concise
+event-data payload in the default table. Long cells are wrapped and truncated.
+`--full` expands pretty tables with source columns such as channel and file, and
+prints full payload content while preserving renderer-controlled wrapping. Raw
+newlines are normalized before rendering, and table wrapping is controlled by
+the table renderer so cell content cannot desynchronize row widths.
+
+Pretty correlation output uses a correlation table with timestamp, correlation
+rule, match count, level, group, and payload columns. `--full` also includes the
+window column and disables payload truncation. The payload uses only the
+contributing-event fields requested with `--correlation-event-field`, bounded by
+`--correlation-event-limit`.
+
 ## Conditions
 
 Supported condition syntax:
@@ -142,6 +168,12 @@ not full raw EVTX payloads, to keep correlation memory bounded.
 When the limit is exceeded, `stitch` evicts the oldest state group by latest
 event timestamp. Hunt stats include `correlation_state` and
 `correlation_evicted` when correlation rules are loaded.
+
+`--correlation-lateness` controls how far behind the newest observed event time
+a correlation match may arrive. The default is `2m`. Events older than the
+current watermark are ignored for correlation, and state outside each rule's
+`timespan` relative to the watermark is pruned. This allows bounded
+out-of-order EVTX streams without expanding a rule's correlation window.
 
 ## Field Matching
 

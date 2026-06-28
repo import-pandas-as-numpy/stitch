@@ -104,6 +104,8 @@ pub enum Command {
 }
 
 #[derive(Debug, Args)]
+// Clap argument structs intentionally mirror boolean CLI switches.
+#[allow(clippy::struct_excessive_bools)]
 pub struct HuntArgs {
     #[arg(
         long,
@@ -172,6 +174,9 @@ pub struct HuntArgs {
 
     #[arg(long, value_enum, default_value_t = OutputFormat::Pretty)]
     pub format: OutputFormat,
+
+    #[arg(long, help = "Print expanded pretty tables with full payload content")]
+    pub full: bool,
 
     #[arg(long, value_name = "FILE", help = "Write results to file")]
     pub output: Option<PathBuf>,

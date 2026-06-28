@@ -22,6 +22,17 @@ pub struct DiscoveredInput {
     pub collection_root: PathBuf,
 }
 
+impl DiscoveredInput {
+    #[cfg(test)]
+    #[must_use]
+    pub fn new(path: PathBuf, collection_root: PathBuf) -> Self {
+        Self {
+            path,
+            collection_root,
+        }
+    }
+}
+
 #[derive(Debug, Error)]
 pub enum DiscoveryError {
     #[error("no input paths were provided")]

@@ -2,7 +2,10 @@
 
 ## 2026-06-28
 
-Current milestone: Milestone 3, Hunt With Correlation.
+Current milestone: Post-MVP Hardening.
+
+Milestone 3 status: Complete for the current supported subset.
+Milestone 4 status: Complete for the current supported subset; XML output is intentionally out of scope.
 
 Completed:
 
@@ -35,6 +38,21 @@ Completed:
 27. Added parser-focused Sigma syntax fixtures for valid base rules, valid correlation rules, malformed base rules, malformed correlation rules, and broken YAML.
 28. Added loader regression tests that validate the syntax fixture corpus and assert readable diagnostics for common typos and malformations.
 29. Added selected contributing-event details for Sigma correlation output with `--correlation-event-field` and bounded pretty rendering via `--correlation-event-limit`.
+30. Wired `--correlation-lateness` into Sigma correlation as an event-time watermark, with stale-state pruning and unit coverage for bounded out-of-order and too-late matches.
+31. Added mixed-host correlation scope regressions proving default `host` scope does not mix computers while `global` scope can correlate across hosts.
+32. Started Milestone 4 by implementing `stitch dump` JSONL output for generated EVTX fixtures.
+33. Added dump JSONL support for default normalized-plus-raw records, `--fields` projection, `--raw`, `--output <FILE>`, `--stats`, `--fail-fast`, and `--errors`.
+34. Added `dump --format json` array output with compact/pretty rendering, stdout and output-file support, and generated-fixture integration coverage.
+35. Added projected `dump --format csv` output with CSV escaping, output-file support, and a clear error when `--fields` is omitted to avoid schema discovery.
+36. Closed Milestone 4 by documenting XML as intentionally out of scope and rejecting unsupported CSV option combinations instead of silently ignoring them.
+37. Added Rayon as a runtime dependency for file-level parallel processing.
+38. Wired Rayon for no-limit `search`, `dump`, and non-correlation `hunt`, preserving deterministic discovery-order output.
+39. Kept correlation-enabled `hunt` sequential because correlation state is event-order and watermark sensitive.
+40. Added timeout-guarded concurrency integration tests comparing `--jobs 1` and `--jobs 4`.
+41. Added `docs/performance.md` to record local Rayon timing notes and measurement commands.
+42. Recorded local repeated-fixture Rayon timings: dump CSV improved from `real 9.02` to `2.55`, quiet search from `8.91` to `2.21`, and quiet non-correlation hunt from `8.48` to `2.22` when moving from `--jobs 1` to `--jobs 4`.
+43. Clarified Rayon execution policy: concurrency is the default via `--jobs 0` using Rayon's system-sized worker pool; sequential execution is explicit with `--jobs 1` or reserved for single-file input, `search --limit`, and correlation-enabled `hunt`.
+44. Beautified default human output: unprojected pretty `search` now shows the full raw event as a YAML-like nested block, projected search stays concise, non-correlation `hunt` renders Chainsaw-inspired Unicode tables with event context and payload columns, and pretty correlation output renders selected contributing-event fields in an in-table payload column.
 
 Verification:
 
@@ -63,6 +81,130 @@ Verification:
 23. `cargo test --all-targets --all-features`
 24. `cargo clippy --all-targets --all-features -- -D warnings -W clippy::pedantic`
 25. `cargo check --all-targets --all-features`
+26. `cargo test correlation_lateness -- --nocapture`
+27. `cargo fmt --all -- --check`
+28. `cargo clippy --all-targets --all-features -- -D warnings -W clippy::pedantic`
+29. `cargo check --all-targets --all-features`
+30. `cargo test --all-targets --all-features`
+31. `cargo test scoped_correlation -- --nocapture`
+32. `cargo test --test generated_evtx_fixtures dump_jsonl -- --nocapture`
+33. `cargo fmt --all -- --check`
+34. `cargo check --all-targets --all-features`
+35. `cargo test --all-targets --all-features`
+36. `cargo clippy --all-targets --all-features -- -D warnings -W clippy::pedantic`
+37. `cargo test --test generated_evtx_fixtures dump_json -- --nocapture`
+38. `cargo fmt --all -- --check`
+39. `cargo check --all-targets --all-features`
+40. `cargo test --all-targets --all-features`
+41. `cargo clippy --all-targets --all-features -- -D warnings -W clippy::pedantic`
+42. `cargo test --test generated_evtx_fixtures dump_csv -- --nocapture`
+43. `cargo fmt --all -- --check`
+44. `cargo check --all-targets --all-features`
+45. `cargo test --all-targets --all-features`
+46. `cargo clippy --all-targets --all-features -- -D warnings -W clippy::pedantic`
+47. `cargo test --test generated_evtx_fixtures dump_csv -- --nocapture`
+48. `cargo fmt --all -- --check`
+49. `cargo check --all-targets --all-features`
+50. `cargo test --all-targets --all-features`
+51. `cargo clippy --all-targets --all-features -- -D warnings -W clippy::pedantic`
+52. `cargo test --test generated_evtx_fixtures parallel_jobs -- --nocapture`
+53. `cargo test --test sigma_hunt_fixtures jobs -- --nocapture`
+54. Local timing commands recorded in `docs/performance.md`.
+55. `cargo fmt --all -- --check`
+56. `cargo check --all-targets --all-features`
+57. `cargo test --all-targets --all-features`
+58. `cargo clippy --all-targets --all-features -- -D warnings -W clippy::pedantic`
+59. `cargo run --quiet -- search -i tests/fixtures/evtx/security-auth.evtx -q "event.id == 4625" --limit 1`
+60. `cargo run --quiet -- search -i tests/fixtures/evtx/security-auth.evtx -q "event.id == 4625 | keep timestamp, event.id, computer, Event.EventData.TargetUserName" --limit 1`
+61. `cargo run --quiet -- hunt -i tests/fixtures/evtx/sysmon-activity.evtx --rules tests/fixtures/sigma/sysmon_powershell_network.yml --summary`
+62. `cargo run --quiet -- hunt -i tests/fixtures/correlation-evtx/sysmon-correlation.evtx --rules tests/fixtures/sigma-correlation/sysmon_process_activity_count.yml --correlation-event-field Event.EventData.ProcessGuid --correlation-event-field Event.EventData.Image --correlation-event-limit 2`
+63. `cargo test --test generated_evtx_fixtures search_parallel_jobs_match_single_worker_with_timeout -- --nocapture`
+64. `cargo test --test sigma_hunt_fixtures -- --nocapture`
+65. `cargo fmt --all -- --check`
+66. `cargo check --all-targets --all-features`
+67. `cargo test --all-targets --all-features`
+68. `cargo clippy --all-targets --all-features -- -D warnings -W clippy::pedantic`
+69. Corrected pretty `hunt`/correlation output from table-like rows to bordered tables, then reran `cargo test --all-targets --all-features`, `cargo clippy --all-targets --all-features -- -D warnings -W clippy::pedantic`, `cargo fmt --all -- --check`, and `git diff --check`.
+70. Reworked pretty `hunt` and correlation tables after reviewing Chainsaw's `src/cli.rs` implementation: context and payload now live inside Unicode table columns with wrapped/truncated field content.
+71. Hardened pretty table rendering so column widths are computed centrally with explicit caps, raw newlines are normalized before wrapping, long tokens are split by the renderer, and a unit regression verifies table alignment with embedded newlines and Unicode rule text.
+72. Added `hunt --full` as the explicit escape hatch for expanded pretty tables: default hunt output stays compact, while full output restores source columns such as channel/file and disables payload truncation without bypassing table wrapping.
+73. `cargo fmt --all -- --check`
+74. `cargo check --all-targets --all-features`
+75. `cargo test --all-targets --all-features`
+76. `cargo clippy --all-targets --all-features -- -D warnings -W clippy::pedantic`
+77. `git diff --check`
+78. `cargo run --quiet -- hunt -i tests/fixtures/evtx/sysmon-activity.evtx --rules tests/fixtures/sigma/sysmon_powershell_network.yml --format pretty --summary`
+79. `cargo run --quiet -- hunt -i tests/fixtures/evtx/sysmon-activity.evtx --rules tests/fixtures/sigma/sysmon_powershell_network.yml --format pretty --full --summary`
+80. Began Post-MVP search hardening by adding safe STQL metadata prefilters for globally required `and` predicates on timestamp, event ID, channel, provider, and computer.
+81. `cargo test query::tests::search_query -- --nocapture`
+82. `cargo fmt --all -- --check`
+83. `cargo check --all-targets --all-features`
+84. `cargo test --all-targets --all-features`
+85. `cargo clippy --all-targets --all-features -- -D warnings -W clippy::pedantic`
+86. `git diff --check`
+87. Added conservative Sigma metadata prefilters for required positive detection predicates on timestamp, event ID, channel, provider, and computer, while skipping `or`, `not`, and multi-alternative selections.
+88. `cargo test sigma::tests::sigma_ -- --nocapture`
+89. `cargo fmt --all -- --check`
+90. `cargo check --all-targets --all-features`
+91. `cargo test --all-targets --all-features`
+92. `cargo clippy --all-targets --all-features -- -D warnings -W clippy::pedantic`
+93. `git diff --check`
+94. Added a reusable per-event Sigma match context so hunt can cache raw event text once per event for keyword-heavy rule evaluation.
+95. `cargo test sigma::tests::sigma_event_context -- --nocapture`
+96. `cargo fmt --all -- --check`
+97. `cargo check --all-targets --all-features`
+98. `cargo test --all-targets --all-features`
+99. `cargo clippy --all-targets --all-features -- -D warnings -W clippy::pedantic`
+100. `git diff --check`
+101. Added conservative Sigma `logsource.service` channel prefilters for common Windows services while leaving unknown services unfiltered.
+102. `cargo test sigma::tests::sigma_logsource -- --nocapture`
+103. `cargo fmt --all -- --check`
+104. `cargo check --all-targets --all-features`
+105. `cargo test --all-targets --all-features`
+106. `cargo clippy --all-targets --all-features -- -D warnings -W clippy::pedantic`
+107. `git diff --check`
+108. Added `scripts/bench-local.sh`, a repeatable local benchmark harness that builds the requested profile, runs the local binary directly, and writes `target/benchmarks/report.md`.
+109. `bash -n scripts/bench-local.sh`
+110. `STITCH_BENCH_PROFILE=dev STITCH_BENCH_REPETITIONS=1 scripts/bench-local.sh`
+111. `cargo fmt --all -- --check`
+112. `cargo check --all-targets --all-features`
+113. `cargo test --all-targets --all-features`
+114. `cargo clippy --all-targets --all-features -- -D warnings -W clippy::pedantic`
+115. `git diff --check`
+116. Added CLI error-path regressions for failed dump output-file creation and failed search parse-error file creation.
+117. `cargo test --test generated_evtx_fixtures create_errors -- --nocapture`
+118. `cargo fmt --all -- --check`
+119. `cargo check --all-targets --all-features`
+120. `cargo test --all-targets --all-features`
+121. `cargo clippy --all-targets --all-features -- -D warnings -W clippy::pedantic`
+122. `git diff --check`
+123. Streamed sequential dump records directly through `DumpOutput` and documented the remaining deterministic per-input buffering used by parallel dump/search.
+124. Added hunt-plan event-ID indexing so rules with required Event IDs can be skipped as a group before full Sigma evaluation.
+125. Added a correlation stress regression proving lateness watermark advancement prunes stale state across groups.
+126. Added a parallel malformed-EVTX search regression that verifies readable failure without hanging.
+127. Added `docs/output.md` with examples for search, hunt, `hunt --full`, correlation output, dump output, and parallelism.
+128. `cargo test --test generated_evtx_fixtures dump_ -- --nocapture`
+129. `cargo test runtime::tests::hunt_plan_indexes_rules_by_required_event_id -- --nocapture`
+130. `cargo test sigma::tests::correlation_lateness -- --nocapture`
+131. `cargo test --test generated_evtx_fixtures malformed -- --nocapture`
+132. `bash -n scripts/bench-local.sh`
+133. `cargo fmt --all -- --check`
+134. `cargo check --all-targets --all-features`
+135. `cargo test --all-targets --all-features`
+136. `cargo clippy --all-targets --all-features -- -D warnings -W clippy::pedantic`
+137. `git diff --check`
+138. Added segmented GitHub Actions CI and security workflows with least-privilege permissions, pinned official actions, disabled checkout credential persistence, Cargo registry/git caching, benchmark smoke coverage, and `zizmor` workflow auditing.
+139. Added `docs/ci.md` documenting the CI/CD security posture and workflow layout.
+140. `zizmor --persona pedantic .github/workflows`
+141. `bash -n scripts/bench-local.sh`
+142. `cargo fmt --all -- --check`
+143. `cargo check --all-targets --all-features`
+144. `cargo test --all-targets --all-features`
+145. `cargo clippy --all-targets --all-features -- -D warnings -W clippy::pedantic`
+146. Audited code smells/security/performance hot paths and pinned GitHub Actions runners to `ubuntu-24.04` for more reproducible CI.
+147. Benchmarked a candidate Sigma case-insensitive matching optimization before/after and rejected it because it did not improve performance (`real 3.73s` before, `real 3.88s` after on the audit fixture loop).
+148. Added a performance-only quiet search/hunt fast path that scans EVTX records as JSON bytes when match results are not observable (`--quiet` without `--stats`, and without `--limit` for search).
+149. Benchmarked the quiet fast path with `STITCH_BENCH_REPETITIONS=1000 scripts/bench-local.sh`: search quiet improved from `real 0.38` to `0.23`, non-correlation hunt quiet improved from `real 0.39` to `0.36` at `--jobs 1` and from `0.11` to `0.06` at `--jobs 4`, while dump stayed effectively flat.
 
 ## 2026-06-27
 

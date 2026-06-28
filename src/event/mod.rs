@@ -201,16 +201,15 @@ fn json_as_text(value: &Value) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
+
     use serde_json::json;
 
     use super::*;
 
     #[test]
     fn extracts_normalized_metadata_from_evtx_json_shape() {
-        let input = DiscoveredInput {
-            path: PathBuf::from("Security.evtx"),
-            collection_root: PathBuf::from("."),
-        };
+        let input = DiscoveredInput::new(PathBuf::from("Security.evtx"), PathBuf::from("."));
         let event = Event::from_raw(
             &input,
             Some(42),
@@ -235,10 +234,7 @@ mod tests {
 
     #[test]
     fn resolves_normalized_and_raw_fields() {
-        let input = DiscoveredInput {
-            path: PathBuf::from("Security.evtx"),
-            collection_root: PathBuf::from("."),
-        };
+        let input = DiscoveredInput::new(PathBuf::from("Security.evtx"), PathBuf::from("."));
         let event = Event::from_raw(
             &input,
             None,
@@ -264,10 +260,7 @@ mod tests {
 
     #[test]
     fn normalizes_evtx_attribute_and_text_shapes() {
-        let input = DiscoveredInput {
-            path: PathBuf::from("System.evtx"),
-            collection_root: PathBuf::from("."),
-        };
+        let input = DiscoveredInput::new(PathBuf::from("System.evtx"), PathBuf::from("."));
         let event = Event::from_raw(
             &input,
             None,

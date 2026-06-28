@@ -1,4 +1,5 @@
 use std::borrow::Cow;
+use std::cell::OnceCell;
 use std::collections::{HashMap, VecDeque};
 use std::fmt::Write as _;
 use std::fs;
@@ -22,6 +23,7 @@ pub struct SigmaRule {
     pub status: Option<String>,
     pub level: Option<String>,
     pub tags: Vec<String>,
+    logsource: LogsourcePrefilter,
     detection: Detection,
 }
 
@@ -93,6 +95,12 @@ pub struct SigmaCorrelationMatch {
     pub matches: Vec<CorrelationSourceMatch>,
 }
 
+#[derive(Debug)]
+pub struct SigmaEventContext<'a> {
+    event: &'a Event,
+    raw_text: OnceCell<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CorrelationSourceMatch {
     pub rule_title: String,
@@ -112,6 +120,8 @@ pub struct SigmaCorrelationEngine {
     rules: Vec<CorrelationRuntimeRule>,
     scope: CorrelationRuntimeScope,
     max_state: usize,
+    allowed_lateness: Duration,
+    max_seen_timestamp: Option<OffsetDateTime>,
     state: HashMap<CorrelationStateKey, CorrelationWindow>,
     evicted_state_entries: usize,
 }
@@ -186,14 +196,23 @@ struct RawSigmaRule {
     tags: StringList,
     #[serde(rename = "type")]
     rule_type: Option<String>,
+    logsource: Option<RawLogsource>,
     correlation: Option<noyalib::Value>,
     detection: Option<noyalib::Value>,
+}
+
+#[derive(Debug, Default, Clone, Deserialize)]
+struct RawLogsource {
+    product: Option<String>,
+    service: Option<String>,
+    category: Option<String>,
 }
 
 #[derive(Debug, Clone)]
 struct Detection {
     condition: ConditionExpr,
     selections: Vec<Selection>,
+    prefilter: SigmaMetadataPrefilter,
 }
 
 #[derive(Debug, Clone)]
@@ -293,9 +312,20 @@ enum ConditionExpr {
 }
 
 impl SigmaRule {
+    #[cfg(test)]
     #[must_use]
     pub fn matches(&self, event: &Event) -> bool {
-        self.detection.matches(event)
+        self.matches_context(&SigmaEventContext::new(event))
+    }
+
+    #[must_use]
+    pub fn matches_context(&self, context: &SigmaEventContext<'_>) -> bool {
+        self.logsource.matches(context.event()) && self.detection.matches(context)
+    }
+
+    #[must_use]
+    pub fn required_event_ids(&self) -> Option<Vec<u64>> {
+        self.detection.prefilter.required_event_ids()
     }
 
     #[must_use]
@@ -312,6 +342,16 @@ impl SigmaRule {
     }
 
     #[cfg(test)]
+    fn metadata_prefilter_count(&self) -> usize {
+        self.detection.prefilter.len()
+    }
+
+    #[cfg(test)]
+    fn logsource_prefilter_count(&self) -> usize {
+        self.logsource.len()
+    }
+
+    #[cfg(test)]
     pub fn test_rule(title: impl Into<String>, level: Option<String>) -> Self {
         let title = title.into();
         Self {
@@ -322,11 +362,118 @@ impl SigmaRule {
             status: Some("test".to_owned()),
             level,
             tags: vec!["attack.execution".to_owned()],
+            logsource: LogsourcePrefilter::default(),
             detection: Detection {
                 condition: ConditionExpr::Selection("selection".to_owned()),
                 selections: Vec::new(),
+                prefilter: SigmaMetadataPrefilter::default(),
             },
         }
+    }
+}
+
+impl<'a> SigmaEventContext<'a> {
+    #[must_use]
+    pub fn new(event: &'a Event) -> Self {
+        Self {
+            event,
+            raw_text: OnceCell::new(),
+        }
+    }
+
+    fn event(&self) -> &Event {
+        self.event
+    }
+
+    fn raw_text(&self) -> &str {
+        self.raw_text.get_or_init(|| self.event.raw.to_string())
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+struct LogsourcePrefilter {
+    channels: Vec<String>,
+}
+
+impl LogsourcePrefilter {
+    fn from_raw(logsource: Option<&RawLogsource>) -> Self {
+        let Some(logsource) = logsource else {
+            return Self::default();
+        };
+
+        if !logsource_is_windows(logsource) {
+            return Self::default();
+        }
+
+        Self {
+            channels: logsource_channels(logsource),
+        }
+    }
+
+    fn matches(&self, event: &Event) -> bool {
+        self.channels.is_empty()
+            || event.metadata.channel.as_deref().is_some_and(|channel| {
+                self.channels
+                    .iter()
+                    .any(|expected| channel.eq_ignore_ascii_case(expected))
+            })
+    }
+
+    #[cfg(test)]
+    fn len(&self) -> usize {
+        self.channels.len()
+    }
+}
+
+fn logsource_is_windows(logsource: &RawLogsource) -> bool {
+    logsource
+        .product
+        .as_deref()
+        .is_none_or(|product| product.eq_ignore_ascii_case("windows"))
+}
+
+fn logsource_channels(logsource: &RawLogsource) -> Vec<String> {
+    let mut channels = Vec::new();
+
+    if let Some(service) = logsource.service.as_deref() {
+        channels.extend(logsource_service_channels(service));
+    }
+
+    if let Some(category) = logsource.category.as_deref() {
+        channels.extend(logsource_category_channels(category));
+    }
+
+    channels.sort();
+    channels.dedup();
+    channels
+}
+
+fn logsource_service_channels(service: &str) -> Vec<String> {
+    match service.to_ascii_lowercase().as_str() {
+        "security" => vec!["Security".to_owned()],
+        "system" => vec!["System".to_owned()],
+        "sysmon" => vec!["Microsoft-Windows-Sysmon/Operational".to_owned()],
+        "powershell" => vec![
+            "Microsoft-Windows-PowerShell/Operational".to_owned(),
+            "Windows PowerShell".to_owned(),
+        ],
+        "defender" | "windefend" | "microsoft-windows-windows defender" => {
+            vec!["Microsoft-Windows-Windows Defender/Operational".to_owned()]
+        }
+        "wmi" | "wmi-activity" => vec!["Microsoft-Windows-WMI-Activity/Operational".to_owned()],
+        "taskscheduler" | "task-scheduler" => {
+            vec!["Microsoft-Windows-TaskScheduler/Operational".to_owned()]
+        }
+        _ => Vec::new(),
+    }
+}
+
+fn logsource_category_channels(category: &str) -> Vec<String> {
+    match category.to_ascii_lowercase().as_str() {
+        "process_creation" | "network_connection" | "file_event" | "dns_query" => {
+            vec!["Microsoft-Windows-Sysmon/Operational".to_owned()]
+        }
+        _ => Vec::new(),
     }
 }
 
@@ -358,6 +505,16 @@ impl SigmaCorrelationEngine {
         scope: CorrelationRuntimeScope,
         max_state: usize,
     ) -> Self {
+        Self::new_with_lateness(rules, scope, max_state, Duration::seconds(0))
+    }
+
+    #[must_use]
+    pub fn new_with_lateness(
+        rules: &[SigmaCorrelationRule],
+        scope: CorrelationRuntimeScope,
+        max_state: usize,
+        allowed_lateness: Duration,
+    ) -> Self {
         Self {
             rules: rules
                 .iter()
@@ -367,6 +524,8 @@ impl SigmaCorrelationEngine {
                 .collect(),
             scope,
             max_state,
+            allowed_lateness,
+            max_seen_timestamp: None,
             state: HashMap::new(),
             evicted_state_entries: 0,
         }
@@ -400,6 +559,12 @@ impl SigmaCorrelationEngine {
         let Some(timestamp) = timestamp else {
             return matches;
         };
+        let watermark = self.update_watermark(timestamp);
+        self.evict_expired_state(watermark);
+
+        if timestamp < watermark {
+            return matches;
+        }
 
         for runtime_rule in self.rules.clone() {
             let Some(reference_index) = correlation_reference_index(&runtime_rule.rule, rule)
@@ -420,17 +585,24 @@ impl SigmaCorrelationEngine {
             };
             let source = correlation_source_match(rule, event, event_fields);
             let window = self.state.entry(key).or_default();
-            window.matches.push_back(CorrelationWindowMatch {
-                timestamp,
-                source,
-                values,
-                reference_index,
-            });
+            insert_correlation_match(
+                &mut window.matches,
+                CorrelationWindowMatch {
+                    timestamp,
+                    source,
+                    values,
+                    reference_index,
+                },
+            );
             evict_old_correlation_matches(
                 &mut window.matches,
-                timestamp,
+                watermark,
                 runtime_rule.rule.correlation.timespan,
             );
+
+            if window.matches.is_empty() {
+                continue;
+            }
 
             let condition_matches = correlation_window_matches(&runtime_rule.rule, window);
             if condition_matches && !window.alerted {
@@ -443,6 +615,33 @@ impl SigmaCorrelationEngine {
 
         self.enforce_state_limit();
         matches
+    }
+
+    fn update_watermark(&mut self, timestamp: OffsetDateTime) -> OffsetDateTime {
+        self.max_seen_timestamp = Some(
+            self.max_seen_timestamp
+                .map_or(timestamp, |current| current.max(timestamp)),
+        );
+
+        self.max_seen_timestamp
+            .expect("max seen timestamp should be set")
+            - self.allowed_lateness
+    }
+
+    fn evict_expired_state(&mut self, watermark: OffsetDateTime) {
+        let timespans = self
+            .rules
+            .iter()
+            .map(|rule| (rule.index, rule.rule.correlation.timespan))
+            .collect::<HashMap<_, _>>();
+
+        for (key, window) in &mut self.state {
+            if let Some(timespan) = timespans.get(&key.rule_index) {
+                evict_old_correlation_matches(&mut window.matches, watermark, *timespan);
+            }
+        }
+
+        self.state.retain(|_, window| !window.matches.is_empty());
     }
 
     fn enforce_state_limit(&mut self) {
@@ -461,31 +660,167 @@ impl SigmaCorrelationEngine {
 }
 
 impl Detection {
-    fn matches(&self, event: &Event) -> bool {
-        self.condition.matches(event, &self.selections)
+    fn matches(&self, context: &SigmaEventContext<'_>) -> bool {
+        self.prefilter.matches(context.event()) && self.condition.matches(context, &self.selections)
     }
 }
 
+#[derive(Debug, Clone, Default)]
+struct SigmaMetadataPrefilter {
+    predicates: Vec<FieldPredicate>,
+}
+
+impl SigmaMetadataPrefilter {
+    fn from_condition(condition: &ConditionExpr, selections: &[Selection]) -> Self {
+        let mut predicates = Vec::new();
+        collect_condition_prefilters(condition, selections, &mut predicates);
+        Self { predicates }
+    }
+
+    fn matches(&self, event: &Event) -> bool {
+        self.predicates
+            .iter()
+            .all(|predicate| predicate.matches(event))
+    }
+
+    fn required_event_ids(&self) -> Option<Vec<u64>> {
+        let mut event_ids = None;
+
+        for predicate in &self.predicates {
+            if predicate.field == "event.id" {
+                event_ids = event_id_values(predicate);
+            }
+        }
+
+        event_ids
+    }
+
+    #[cfg(test)]
+    fn len(&self) -> usize {
+        self.predicates.len()
+    }
+}
+
+fn event_id_values(predicate: &FieldPredicate) -> Option<Vec<u64>> {
+    let FieldMatcher::Equals { require_all, .. } = predicate.matcher else {
+        return None;
+    };
+
+    let values = predicate
+        .values
+        .iter()
+        .map(|value| match value {
+            SigmaValue::Number(value) => Some(*value),
+            SigmaValue::String(value) => value.parse().ok(),
+            SigmaValue::Bool(_) | SigmaValue::Null => None,
+        })
+        .collect::<Option<Vec<_>>>()?;
+
+    if require_all && values.len() != 1 {
+        return None;
+    }
+
+    Some(values)
+}
+
+fn collect_condition_prefilters(
+    condition: &ConditionExpr,
+    selections: &[Selection],
+    predicates: &mut Vec<FieldPredicate>,
+) {
+    match condition {
+        ConditionExpr::Selection(name) => {
+            if let Some(selection) = selections.iter().find(|selection| selection.name == *name) {
+                collect_selection_prefilters(selection, predicates);
+            }
+        }
+        ConditionExpr::AllOf(pattern) => {
+            for selection in matching_selections(pattern, selections) {
+                collect_selection_prefilters(selection, predicates);
+            }
+        }
+        ConditionExpr::And(left, right) => {
+            collect_condition_prefilters(left, selections, predicates);
+            collect_condition_prefilters(right, selections, predicates);
+        }
+        ConditionExpr::OneOf(_) | ConditionExpr::Not(_) | ConditionExpr::Or(_, _) => {}
+    }
+}
+
+fn collect_selection_prefilters(selection: &Selection, predicates: &mut Vec<FieldPredicate>) {
+    let [alternative] = selection.alternatives.as_slice() else {
+        return;
+    };
+
+    predicates.extend(
+        alternative
+            .predicates
+            .iter()
+            .filter(|predicate| is_metadata_prefilter_predicate(predicate))
+            .cloned(),
+    );
+}
+
+fn is_metadata_prefilter_predicate(predicate: &FieldPredicate) -> bool {
+    is_metadata_prefilter_field(&predicate.field)
+        && !predicate
+            .values
+            .iter()
+            .any(|value| matches!(value, SigmaValue::Null))
+        && matches!(
+            predicate.matcher,
+            FieldMatcher::Equals { .. }
+                | FieldMatcher::LessThan { .. }
+                | FieldMatcher::LessThanOrEqual { .. }
+                | FieldMatcher::GreaterThan { .. }
+                | FieldMatcher::GreaterThanOrEqual { .. }
+        )
+}
+
+fn is_metadata_prefilter_field(field: &str) -> bool {
+    matches!(
+        field,
+        "timestamp"
+            | "event.timestamp"
+            | "winlog.timestamp"
+            | "Event.System.TimeCreated.SystemTime"
+            | "Event.System.TimeCreated.#attributes.SystemTime"
+            | "channel"
+            | "event.channel"
+            | "winlog.channel"
+            | "provider"
+            | "event.provider"
+            | "winlog.provider_name"
+            | "event.id"
+            | "event_id"
+            | "winlog.event_id"
+            | "computer"
+            | "host"
+            | "host.name"
+            | "source.computer"
+    )
+}
+
 impl ConditionExpr {
-    fn matches(&self, event: &Event, selections: &[Selection]) -> bool {
+    fn matches(&self, context: &SigmaEventContext<'_>, selections: &[Selection]) -> bool {
         match self {
             Self::Selection(name) => selections
                 .iter()
                 .find(|selection| selection.name == *name)
-                .is_some_and(|selection| selection.matches(event)),
+                .is_some_and(|selection| selection.matches(context)),
             Self::OneOf(pattern) => matching_selections(pattern, selections)
                 .into_iter()
-                .any(|selection| selection.matches(event)),
+                .any(|selection| selection.matches(context)),
             Self::AllOf(pattern) => {
                 let matched = matching_selections(pattern, selections);
-                !matched.is_empty() && matched.iter().all(|selection| selection.matches(event))
+                !matched.is_empty() && matched.iter().all(|selection| selection.matches(context))
             }
-            Self::Not(expression) => !expression.matches(event, selections),
+            Self::Not(expression) => !expression.matches(context, selections),
             Self::And(left, right) => {
-                left.matches(event, selections) && right.matches(event, selections)
+                left.matches(context, selections) && right.matches(context, selections)
             }
             Self::Or(left, right) => {
-                left.matches(event, selections) || right.matches(event, selections)
+                left.matches(context, selections) || right.matches(context, selections)
             }
         }
     }
@@ -541,19 +876,19 @@ fn wildcard_matches(pattern: &str, value: &str) -> bool {
 }
 
 impl Selection {
-    fn matches(&self, event: &Event) -> bool {
+    fn matches(&self, context: &SigmaEventContext<'_>) -> bool {
         self.alternatives
             .iter()
-            .any(|alternative| alternative.matches(event))
+            .any(|alternative| alternative.matches(context))
     }
 }
 
 impl SelectionAlternative {
-    fn matches(&self, event: &Event) -> bool {
+    fn matches(&self, context: &SigmaEventContext<'_>) -> bool {
         self.predicates
             .iter()
-            .all(|predicate| predicate.matches(event))
-            && self.keywords.iter().all(|keyword| keyword.matches(event))
+            .all(|predicate| predicate.matches(context.event()))
+            && self.keywords.iter().all(|keyword| keyword.matches(context))
     }
 }
 
@@ -596,17 +931,16 @@ impl FieldPredicate {
 }
 
 impl KeywordPredicate {
-    fn matches(&self, event: &Event) -> bool {
-        let event_text = event.raw.to_string();
-
+    fn matches(&self, context: &SigmaEventContext<'_>) -> bool {
+        let event_text = context.raw_text();
         if self.require_all {
             self.values
                 .iter()
-                .all(|value| keyword_value_matches(&event_text, value, self.case))
+                .all(|value| keyword_value_matches(event_text, value, self.case))
         } else {
             self.values
                 .iter()
-                .any(|value| keyword_value_matches(&event_text, value, self.case))
+                .any(|value| keyword_value_matches(event_text, value, self.case))
         }
     }
 }
@@ -782,6 +1116,7 @@ fn load_document(
         status: raw.status,
         level: raw.level,
         tags: raw.tags.0,
+        logsource: LogsourcePrefilter::from_raw(raw.logsource.as_ref()),
         detection: parse_detection(path, raw.detection)?,
     });
 
@@ -902,7 +1237,7 @@ fn parse_correlation_timespan(
     value: &noyalib::Value,
 ) -> Result<Duration, SigmaLoadError> {
     let timespan = parse_correlation_string(path, "timespan", value)?;
-    parse_duration(&timespan).ok_or_else(|| {
+    parse_sigma_duration(&timespan).ok_or_else(|| {
         unsupported_rule(
             path,
             format!(
@@ -1121,7 +1456,8 @@ fn split_yaml_documents(content: &str) -> Vec<&str> {
     documents
 }
 
-fn parse_duration(value: &str) -> Option<Duration> {
+#[must_use]
+pub fn parse_sigma_duration(value: &str) -> Option<Duration> {
     let unit = value.chars().last()?;
     let number = value[..value.len().saturating_sub(unit.len_utf8())]
         .parse::<i64>()
@@ -1306,14 +1642,28 @@ fn correlation_source_match(
     }
 }
 
+fn insert_correlation_match(
+    matches: &mut VecDeque<CorrelationWindowMatch>,
+    entry: CorrelationWindowMatch,
+) {
+    if let Some(index) = matches
+        .iter()
+        .position(|existing| existing.timestamp > entry.timestamp)
+    {
+        matches.insert(index, entry);
+    } else {
+        matches.push_back(entry);
+    }
+}
+
 fn evict_old_correlation_matches(
     matches: &mut VecDeque<CorrelationWindowMatch>,
-    current: OffsetDateTime,
+    watermark: OffsetDateTime,
     timespan: Duration,
 ) {
     while matches
         .front()
-        .is_some_and(|entry| current - entry.timestamp > timespan)
+        .is_some_and(|entry| watermark - entry.timestamp > timespan)
     {
         matches.pop_front();
     }
@@ -1389,10 +1739,12 @@ fn parse_detection(
     .ok_or_else(|| unsupported_rule(path, "condition is empty"))?;
 
     validate_condition_selections(path, &condition, &selections)?;
+    let prefilter = SigmaMetadataPrefilter::from_condition(&condition, &selections);
 
     Ok(Detection {
         condition,
         selections,
+        prefilter,
     })
 }
 
@@ -3322,6 +3674,100 @@ correlation:
     }
 
     #[test]
+    fn host_scoped_correlation_does_not_mix_hosts() {
+        let report = repeated_process_correlation_report();
+        let mut engine =
+            SigmaCorrelationEngine::new(&report.correlations, CorrelationRuntimeScope::Host, 100);
+        let first_host = test_event(json!({
+            "Event": {
+                "System": {
+                    "EventID": 1,
+                    "Computer": "WIN-01",
+                    "TimeCreated": { "SystemTime": "2026-06-28T12:00:00Z" }
+                },
+                "EventData": { "ProcessGuid": "{11111111-1111-1111-1111-111111111111}" }
+            }
+        }));
+        let second_host = test_event(json!({
+            "Event": {
+                "System": {
+                    "EventID": 1,
+                    "Computer": "WIN-02",
+                    "TimeCreated": { "SystemTime": "2026-06-28T12:01:00Z" }
+                },
+                "EventData": { "ProcessGuid": "{11111111-1111-1111-1111-111111111111}" }
+            }
+        }));
+
+        assert!(
+            engine
+                .observe_match(&report.rules[0], &first_host, &[])
+                .is_empty()
+        );
+        assert!(
+            engine
+                .observe_match(&report.rules[0], &second_host, &[])
+                .is_empty(),
+            "host scope must not correlate matching group-by values across computers"
+        );
+        assert_eq!(
+            engine.stats(),
+            SigmaCorrelationStats {
+                state_entries: 2,
+                evicted_state_entries: 0
+            }
+        );
+    }
+
+    #[test]
+    fn global_scoped_correlation_can_match_across_hosts() {
+        let report = repeated_process_correlation_report();
+        let mut engine =
+            SigmaCorrelationEngine::new(&report.correlations, CorrelationRuntimeScope::Global, 100);
+        let first_host = test_event(json!({
+            "Event": {
+                "System": {
+                    "EventID": 1,
+                    "Computer": "WIN-01",
+                    "TimeCreated": { "SystemTime": "2026-06-28T12:00:00Z" }
+                },
+                "EventData": { "ProcessGuid": "{11111111-1111-1111-1111-111111111111}" }
+            }
+        }));
+        let second_host = test_event(json!({
+            "Event": {
+                "System": {
+                    "EventID": 1,
+                    "Computer": "WIN-02",
+                    "TimeCreated": { "SystemTime": "2026-06-28T12:01:00Z" }
+                },
+                "EventData": { "ProcessGuid": "{11111111-1111-1111-1111-111111111111}" }
+            }
+        }));
+
+        assert!(
+            engine
+                .observe_match(&report.rules[0], &first_host, &[])
+                .is_empty()
+        );
+
+        let matches = engine.observe_match(&report.rules[0], &second_host, &[]);
+
+        assert_eq!(
+            matches.len(),
+            1,
+            "global scope should allow cross-host correlation when group-by fields match"
+        );
+        assert_eq!(
+            matches[0].group,
+            [(
+                "ProcessGuid".to_owned(),
+                "{11111111-1111-1111-1111-111111111111}".to_owned()
+            )]
+        );
+    }
+
+    #[test]
     fn reports_invalid_yaml_with_rule_path() {
         let fixture = tempfile::tempdir().expect("tempdir should be created");
         let path = fixture.path().join("broken.yml");
@@ -3371,6 +3817,181 @@ detection:
     }
 
     #[test]
+    fn sigma_rules_extract_safe_metadata_prefilters() {
+        let fixture = tempfile::tempdir().expect("tempdir should be created");
+        let path = fixture.path().join("metadata_prefilter.yml");
+        fs::write(
+            &path,
+            r"
+title: Security Admin Logon
+detection:
+  selection:
+    EventID: 4625
+    Channel: Security
+    Computer: WIN-01
+    Event.EventData.TargetUserName|contains: admin
+  condition: selection
+",
+        )
+        .expect("rule should be written");
+        let report = load_sigma_rules(&[path]).expect("rule should load");
+        let matching = test_event(json!({
+            "Event": {
+                "System": {
+                    "EventID": 4625,
+                    "Channel": "Security",
+                    "Computer": "WIN-01"
+                },
+                "EventData": { "TargetUserName": "alice.admin" }
+            }
+        }));
+        let wrong_metadata = test_event(json!({
+            "Event": {
+                "System": {
+                    "EventID": 4624,
+                    "Channel": "Security",
+                    "Computer": "WIN-01"
+                },
+                "EventData": { "TargetUserName": "alice.admin" }
+            }
+        }));
+
+        assert_eq!(
+            report.rules[0].metadata_prefilter_count(),
+            3,
+            "EventID, Channel, and Computer should become safe metadata prefilters"
+        );
+        assert!(report.rules[0].matches(&matching));
+        assert!(!report.rules[0].matches(&wrong_metadata));
+    }
+
+    #[test]
+    fn sigma_logsource_service_filters_events_by_channel() {
+        let fixture = tempfile::tempdir().expect("tempdir should be created");
+        let path = fixture.path().join("security_logsource.yml");
+        fs::write(
+            &path,
+            r"
+title: Security Failed Logon
+logsource:
+  product: windows
+  service: security
+detection:
+  selection:
+    EventID: 4625
+  condition: selection
+",
+        )
+        .expect("rule should be written");
+        let report = load_sigma_rules(&[path]).expect("rule should load");
+        let security_event = test_event(json!({
+            "Event": {
+                "System": {
+                    "EventID": 4625,
+                    "Channel": "Security"
+                }
+            }
+        }));
+        let sysmon_event = test_event(json!({
+            "Event": {
+                "System": {
+                    "EventID": 4625,
+                    "Channel": "Microsoft-Windows-Sysmon/Operational"
+                }
+            }
+        }));
+
+        assert_eq!(
+            report.rules[0].logsource_prefilter_count(),
+            1,
+            "security service should compile to one channel prefilter"
+        );
+        assert!(report.rules[0].matches(&security_event));
+        assert!(
+            !report.rules[0].matches(&sysmon_event),
+            "same detection should not match events from a filtered-out channel"
+        );
+    }
+
+    #[test]
+    fn sigma_logsource_unknown_service_does_not_filter() {
+        let fixture = tempfile::tempdir().expect("tempdir should be created");
+        let path = fixture.path().join("unknown_logsource.yml");
+        fs::write(
+            &path,
+            r"
+title: Unknown Service Rule
+logsource:
+  product: windows
+  service: custom-service
+detection:
+  selection:
+    EventID: 4625
+  condition: selection
+",
+        )
+        .expect("rule should be written");
+        let report = load_sigma_rules(&[path]).expect("rule should load");
+        let event = test_event(json!({
+            "Event": {
+                "System": {
+                    "EventID": 4625,
+                    "Channel": "Security"
+                }
+            }
+        }));
+
+        assert_eq!(
+            report.rules[0].logsource_prefilter_count(),
+            0,
+            "unknown services should stay unfiltered instead of dropping possible matches"
+        );
+        assert!(report.rules[0].matches(&event));
+    }
+
+    #[test]
+    fn sigma_prefilters_skip_or_and_multi_alternative_selections() {
+        let fixture = tempfile::tempdir().expect("tempdir should be created");
+        let path = fixture.path().join("unsafe_prefilter.yml");
+        fs::write(
+            &path,
+            r"
+title: Multi Branch Rule
+detection:
+  selection_a:
+    EventID: 4625
+  selection_b:
+    Channel: Security
+  selection_c:
+    - EventID: 4688
+    - Computer: WIN-01
+  condition: selection_a or selection_b or selection_c
+",
+        )
+        .expect("rule should be written");
+        let report = load_sigma_rules(&[path]).expect("rule should load");
+        let event = test_event(json!({
+            "Event": {
+                "System": {
+                    "EventID": 4624,
+                    "Channel": "Security",
+                    "Computer": "WIN-02"
+                }
+            }
+        }));
+
+        assert_eq!(
+            report.rules[0].metadata_prefilter_count(),
+            0,
+            "or branches and multi-alternative selections should not become required prefilters"
+        );
+        assert!(
+            report.rules[0].matches(&event),
+            "full Sigma condition should still match through selection_b"
+        );
+    }
+
+    #[test]
     fn evaluates_selection_lists_against_event() {
         let fixture = tempfile::tempdir().expect("tempdir should be created");
         let path = fixture.path().join("logon_events.yml");
@@ -3395,6 +4016,49 @@ detection:
         }));
 
         assert!(report.rules[0].matches(&event));
+    }
+
+    #[test]
+    fn sigma_event_context_can_be_reused_across_keyword_rules() {
+        let fixture = tempfile::tempdir().expect("tempdir should be created");
+        let path = fixture.path().join("keyword_rules.yml");
+        fs::write(
+            &path,
+            r"
+---
+title: PowerShell Keyword
+detection:
+  selection:
+    - powershell.exe
+  condition: selection
+---
+title: Command Line Keyword
+detection:
+  selection:
+    - NoProfile
+  condition: selection
+",
+        )
+        .expect("rule should be written");
+        let report = load_sigma_rules(&[path]).expect("rules should load");
+        let event = test_event(json!({
+            "Event": {
+                "System": { "EventID": 4688 },
+                "EventData": {
+                    "CommandLine": "powershell.exe -NoProfile"
+                }
+            }
+        }));
+        let context = SigmaEventContext::new(&event);
+
+        assert_eq!(report.rules.len(), 2);
+        assert!(
+            report
+                .rules
+                .iter()
+                .all(|rule| rule.matches_context(&context)),
+            "one event context should be reusable across keyword-heavy rule checks"
+        );
     }
 
     #[test]
@@ -4148,6 +4812,273 @@ correlation:
     }
 
     #[test]
+    fn correlation_lateness_allows_bounded_out_of_order_matches() {
+        let fixture = tempfile::tempdir().expect("tempdir should be created");
+        let path = fixture.path().join("bounded_lateness.yml");
+        fs::write(
+            &path,
+            r"
+---
+title: Failed Logon
+name: failed_logon
+detection:
+  selection:
+    EventID: 4625
+  condition: selection
+---
+title: Repeated Failed Logons
+type: correlation
+correlation:
+  type: event_count
+  rules:
+    - failed_logon
+  group-by:
+    - TargetUserName
+  condition:
+    gte: 2
+  timespan: 5m
+",
+        )
+        .expect("correlation fixture should be written");
+        let report = load_sigma_rules(&[path]).expect("rules should load");
+        let mut engine = SigmaCorrelationEngine::new_with_lateness(
+            &report.correlations,
+            CorrelationRuntimeScope::Host,
+            100,
+            Duration::minutes(3),
+        );
+        let first = test_event(json!({
+            "Event": {
+                "System": {
+                    "EventID": 4625,
+                    "Computer": "WIN-01",
+                    "TimeCreated": { "SystemTime": "2026-06-28T12:00:00Z" }
+                },
+                "EventData": { "TargetUserName": "alice" }
+            }
+        }));
+        let future_other_group = test_event(json!({
+            "Event": {
+                "System": {
+                    "EventID": 4625,
+                    "Computer": "WIN-01",
+                    "TimeCreated": { "SystemTime": "2026-06-28T12:07:00Z" }
+                },
+                "EventData": { "TargetUserName": "bob" }
+            }
+        }));
+        let late_same_group = test_event(json!({
+            "Event": {
+                "System": {
+                    "EventID": 4625,
+                    "Computer": "WIN-01",
+                    "TimeCreated": { "SystemTime": "2026-06-28T12:04:00Z" }
+                },
+                "EventData": { "TargetUserName": "alice" }
+            }
+        }));
+
+        assert!(
+            engine
+                .observe_match(&report.rules[0], &first, &[])
+                .is_empty()
+        );
+        assert!(
+            engine
+                .observe_match(&report.rules[0], &future_other_group, &[])
+                .is_empty()
+        );
+
+        let matches = engine.observe_match(&report.rules[0], &late_same_group, &[]);
+
+        assert_eq!(
+            matches.len(),
+            1,
+            "late event within allowed lateness should still complete the correlation"
+        );
+        assert_eq!(matches[0].window_start, "2026-06-28T12:00:00Z");
+        assert_eq!(matches[0].window_end, "2026-06-28T12:04:00Z");
+    }
+
+    #[test]
+    fn correlation_lateness_drops_events_older_than_watermark() {
+        let fixture = tempfile::tempdir().expect("tempdir should be created");
+        let path = fixture.path().join("late_drop.yml");
+        fs::write(
+            &path,
+            r"
+---
+title: Failed Logon
+name: failed_logon
+detection:
+  selection:
+    EventID: 4625
+  condition: selection
+---
+title: Repeated Failed Logons
+type: correlation
+correlation:
+  type: event_count
+  rules:
+    - failed_logon
+  group-by:
+    - TargetUserName
+  condition:
+    gte: 2
+  timespan: 5m
+",
+        )
+        .expect("correlation fixture should be written");
+        let report = load_sigma_rules(&[path]).expect("rules should load");
+        let mut engine = SigmaCorrelationEngine::new_with_lateness(
+            &report.correlations,
+            CorrelationRuntimeScope::Host,
+            100,
+            Duration::minutes(1),
+        );
+        let first = test_event(json!({
+            "Event": {
+                "System": {
+                    "EventID": 4625,
+                    "Computer": "WIN-01",
+                    "TimeCreated": { "SystemTime": "2026-06-28T12:00:00Z" }
+                },
+                "EventData": { "TargetUserName": "alice" }
+            }
+        }));
+        let future_other_group = test_event(json!({
+            "Event": {
+                "System": {
+                    "EventID": 4625,
+                    "Computer": "WIN-01",
+                    "TimeCreated": { "SystemTime": "2026-06-28T12:07:00Z" }
+                },
+                "EventData": { "TargetUserName": "bob" }
+            }
+        }));
+        let too_late_same_group = test_event(json!({
+            "Event": {
+                "System": {
+                    "EventID": 4625,
+                    "Computer": "WIN-01",
+                    "TimeCreated": { "SystemTime": "2026-06-28T12:04:00Z" }
+                },
+                "EventData": { "TargetUserName": "alice" }
+            }
+        }));
+
+        assert!(
+            engine
+                .observe_match(&report.rules[0], &first, &[])
+                .is_empty()
+        );
+        assert!(
+            engine
+                .observe_match(&report.rules[0], &future_other_group, &[])
+                .is_empty()
+        );
+        assert!(
+            engine
+                .observe_match(&report.rules[0], &too_late_same_group, &[])
+                .is_empty(),
+            "event older than the lateness watermark should not complete correlation"
+        );
+    }
+
+    #[test]
+    fn correlation_lateness_prunes_stale_state_across_groups() {
+        let fixture = tempfile::tempdir().expect("tempdir should be created");
+        let path = fixture.path().join("stale_prune.yml");
+        fs::write(
+            &path,
+            r"
+---
+title: Failed Logon
+name: failed_logon
+detection:
+  selection:
+    EventID: 4625
+  condition: selection
+---
+title: Repeated Failed Logons
+type: correlation
+correlation:
+  type: event_count
+  rules:
+    - failed_logon
+  group-by:
+    - TargetUserName
+  condition:
+    gte: 2
+  timespan: 5m
+",
+        )
+        .expect("correlation fixture should be written");
+        let report = load_sigma_rules(&[path]).expect("rules should load");
+        let mut engine = SigmaCorrelationEngine::new_with_lateness(
+            &report.correlations,
+            CorrelationRuntimeScope::Host,
+            100,
+            Duration::seconds(0),
+        );
+        let first_group = test_event(json!({
+            "Event": {
+                "System": {
+                    "EventID": 4625,
+                    "Computer": "WIN-01",
+                    "TimeCreated": { "SystemTime": "2026-06-28T12:00:00Z" }
+                },
+                "EventData": { "TargetUserName": "alice" }
+            }
+        }));
+        let future_other_group = test_event(json!({
+            "Event": {
+                "System": {
+                    "EventID": 4625,
+                    "Computer": "WIN-01",
+                    "TimeCreated": { "SystemTime": "2026-06-28T12:10:00Z" }
+                },
+                "EventData": { "TargetUserName": "bob" }
+            }
+        }));
+        let stale_first_group = test_event(json!({
+            "Event": {
+                "System": {
+                    "EventID": 4625,
+                    "Computer": "WIN-01",
+                    "TimeCreated": { "SystemTime": "2026-06-28T12:04:00Z" }
+                },
+                "EventData": { "TargetUserName": "alice" }
+            }
+        }));
+
+        assert!(
+            engine
+                .observe_match(&report.rules[0], &first_group, &[])
+                .is_empty()
+        );
+        assert_eq!(engine.stats().state_entries, 1);
+        assert!(
+            engine
+                .observe_match(&report.rules[0], &future_other_group, &[])
+                .is_empty()
+        );
+        assert_eq!(
+            engine.stats().state_entries,
+            1,
+            "future event in another group should prune stale alice state and keep only bob"
+        );
+
+        let matches = engine.observe_match(&report.rules[0], &stale_first_group, &[]);
+
+        assert!(
+            matches.is_empty(),
+            "stale event older than watermark must not complete an already-pruned group"
+        );
+        assert_eq!(engine.stats().state_entries, 1);
+    }
+
+    #[test]
     fn value_count_correlation_counts_distinct_values_in_grouped_window() {
         let fixture = tempfile::tempdir().expect("tempdir should be created");
         let path = fixture.path().join("failed_logon_value_count.yml");
@@ -4246,11 +5177,40 @@ correlation:
     }
 
     fn test_event(raw: serde_json::Value) -> Event {
-        let input = DiscoveredInput {
-            path: PathBuf::from("Security.evtx"),
-            collection_root: PathBuf::from("."),
-        };
+        let input = DiscoveredInput::new(PathBuf::from("Security.evtx"), PathBuf::from("."));
 
         Event::from_raw(&input, Some(1), raw)
+    }
+
+    fn repeated_process_correlation_report() -> SigmaLoadReport {
+        let fixture = tempfile::tempdir().expect("tempdir should be created");
+        let path = fixture.path().join("repeated_process.yml");
+        fs::write(
+            &path,
+            r"
+---
+title: Process Start
+name: process_start
+detection:
+  selection:
+    EventID: 1
+  condition: selection
+---
+title: Repeated Process Starts
+type: correlation
+correlation:
+  type: event_count
+  rules:
+    - process_start
+  group-by:
+    - ProcessGuid
+  condition:
+    gte: 2
+  timespan: 5m
+",
+        )
+        .expect("correlation fixture should be written");
+
+        load_sigma_rules(&[path]).expect("rules should load")
     }
 }
