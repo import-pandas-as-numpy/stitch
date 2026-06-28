@@ -1,0 +1,16 @@
+title: Synthetic Sysmon PowerShell Network Connection
+id: 00000000-0000-4000-8000-000000000101
+status: test
+level: high
+tags:
+  - attack.execution
+  - attack.command_and_control
+logsource:
+  product: windows
+  category: network_connection
+detection:
+  selection:
+    EventID: 3
+    Image|endswith: POWERSHELL.EXE
+    DestinationIp|cidr: 203.0.113.0/24
+  condition: selection

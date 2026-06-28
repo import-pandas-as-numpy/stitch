@@ -1,0 +1,16 @@
+title: Synthetic Scheduled PowerShell Task Action
+id: 00000000-0000-4000-8000-000000000103
+status: test
+level: medium
+tags:
+  - attack.persistence
+  - attack.execution
+logsource:
+  product: windows
+  service: taskscheduler
+detection:
+  selection:
+    EventID: 200
+    ActionName|endswith: POWERSHELL.EXE
+    TaskName|contains: \example\
+  condition: selection
