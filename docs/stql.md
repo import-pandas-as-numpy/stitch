@@ -29,6 +29,16 @@ Operators at the same precedence level are evaluated left to right. For example,
 `event.id == 123 or event.id == 456 and user.name == "alice.admin"` is evaluated
 as `event.id == 123 or (event.id == 456 and user.name == "alice.admin")`.
 
+`stitch search` plans safe metadata prefilters for globally required `and`
+predicates on normalized fields such as `timestamp`, `event.id`, `channel`,
+`provider`, and `computer`. `or` and `not` branches are not extracted into
+prefilters because doing so could change query semantics.
+
+For memory-constrained searches, use `--jobs 1` when large pretty/JSON output is
+expected. Parallel search buffers each input's rendered matches before merging
+results in discovery order; `--limit` also runs sequentially so early
+termination remains predictable.
+
 ### Comparisons
 
 Supported operators:
@@ -122,7 +132,12 @@ parse errors.
 event.id == 4624 | keep timestamp, event.id, computer, Event.EventData.TargetUserName
 ```
 
-`keep` controls the additional fields returned for each matching event. The standard source identity fields are still shown in pretty output.
+`keep` controls the additional fields returned for each matching event. The
+standard source identity fields are still shown in pretty output.
+
+When neither `| keep` nor CLI `--fields` is supplied, pretty search output shows
+the full raw event record as a YAML-like nested block. Use `| keep` when the
+terminal output should stay focused on a small set of fields.
 
 If both `| keep ...` and CLI `--fields` are provided, `--fields` takes precedence.
 

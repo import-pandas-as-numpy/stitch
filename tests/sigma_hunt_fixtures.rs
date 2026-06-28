@@ -1,7 +1,56 @@
-use std::process::Command;
+use std::{
+    fs,
+    process::{Command, Output, Stdio},
+    thread,
+    time::{Duration, Instant},
+};
 
 fn stitch() -> Command {
     Command::new(env!("CARGO_BIN_EXE_stitch"))
+}
+
+fn run_with_timeout(mut command: Command, timeout: Duration) -> Output {
+    command.stdout(Stdio::piped()).stderr(Stdio::piped());
+    let mut child = command.spawn().expect("stitch process should spawn");
+    let started = Instant::now();
+
+    loop {
+        if child
+            .try_wait()
+            .expect("stitch process status should be readable")
+            .is_some()
+        {
+            return child
+                .wait_with_output()
+                .expect("stitch output should be readable");
+        }
+
+        if started.elapsed() >= timeout {
+            child
+                .kill()
+                .expect("timed out stitch process should be killed");
+            let output = child
+                .wait_with_output()
+                .expect("timed out stitch output should be readable");
+            panic!(
+                "stitch command timed out after {timeout:?}\nstdout:\n{}\nstderr:\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+
+        thread::sleep(Duration::from_millis(25));
+    }
+}
+
+fn repeated_paths_file(paths: &[&str], repetitions: usize) -> tempfile::NamedTempFile {
+    let file = tempfile::NamedTempFile::new().expect("path list file should be created");
+    let body = (0..repetitions)
+        .flat_map(|_| paths.iter().copied())
+        .collect::<Vec<_>>()
+        .join("\n");
+    fs::write(file.path(), format!("{body}\n")).expect("path list should be written");
+    file
 }
 
 #[test]
@@ -64,6 +113,67 @@ fn hunt_matches_generated_evtx_with_windows_sigma_field_aliases() {
     assert!(
         stdout.contains("stats: scanned=31 matched=4 rules=4 skipped_correlation=0 inputs=7"),
         "expected generated hunt stats to stay stable, got:\n{stdout}"
+    );
+}
+
+#[test]
+fn hunt_parallel_jobs_match_single_worker_without_correlation() {
+    let paths = repeated_paths_file(
+        &[
+            "tests/fixtures/evtx/security-auth.evtx",
+            "tests/fixtures/evtx/sysmon-activity.evtx",
+            "tests/fixtures/evtx/wmi-activity.evtx",
+            "tests/fixtures/evtx/task-scheduler-operational.evtx",
+            "tests/fixtures/evtx/defender-operational.evtx",
+        ],
+        10,
+    );
+
+    let mut single = stitch();
+    single.args([
+        "-j",
+        "1",
+        "--paths-from",
+        paths.path().to_str().expect("temp path should be UTF-8"),
+        "hunt",
+        "--rules",
+        "tests/fixtures/sigma",
+        "--format",
+        "jsonl",
+        "--stats",
+    ]);
+    let single_output = run_with_timeout(single, Duration::from_secs(10));
+
+    assert!(
+        single_output.status.success(),
+        "single-worker hunt failed: {}",
+        String::from_utf8_lossy(&single_output.stderr)
+    );
+
+    let mut parallel = stitch();
+    parallel.args([
+        "-j",
+        "4",
+        "--paths-from",
+        paths.path().to_str().expect("temp path should be UTF-8"),
+        "hunt",
+        "--rules",
+        "tests/fixtures/sigma",
+        "--format",
+        "jsonl",
+        "--stats",
+    ]);
+    let parallel_output = run_with_timeout(parallel, Duration::from_secs(10));
+
+    assert!(
+        parallel_output.status.success(),
+        "parallel hunt failed: {}",
+        String::from_utf8_lossy(&parallel_output.stderr)
+    );
+    assert_eq!(
+        String::from_utf8(single_output.stdout).expect("single output should be UTF-8"),
+        String::from_utf8(parallel_output.stdout).expect("parallel output should be UTF-8"),
+        "parallel hunt output should match single-worker output"
     );
 }
 
@@ -250,6 +360,40 @@ fn hunt_emits_event_count_correlation_matches_from_generated_evtx() {
 }
 
 #[test]
+fn hunt_correlation_with_jobs_stays_ordered_and_completes() {
+    let mut command = stitch();
+    command.args([
+        "-j",
+        "4",
+        "hunt",
+        "-i",
+        "tests/fixtures/correlation-evtx/sysmon-correlation.evtx",
+        "--rules",
+        "tests/fixtures/sigma-correlation",
+        "--format",
+        "jsonl",
+        "--stats",
+    ]);
+    let output = run_with_timeout(command, Duration::from_secs(10));
+
+    assert!(
+        output.status.success(),
+        "correlation hunt with jobs failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8(output.stdout).expect("correlation hunt output should be UTF-8");
+    assert!(
+        stdout.contains(r#""type":"sigma_correlation_match""#),
+        "expected correlation match with --jobs 4, got:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("stats: scanned=4 matched=8 correlation_matched=3"),
+        "expected stable correlation stats with --jobs 4, got:\n{stdout}"
+    );
+}
+
+#[test]
 fn hunt_correlation_output_can_include_bounded_contributing_event_details() {
     let jsonl_output = stitch()
         .args([
@@ -317,18 +461,21 @@ fn hunt_correlation_output_can_include_bounded_contributing_event_details() {
         .expect("stitch hunt output should be valid UTF-8 for pretty results");
 
     assert!(
-        pretty_stdout.contains("contributing events:"),
-        "expected pretty correlation output to include contributing-event section, got:\n{pretty_stdout}"
+        pretty_stdout.contains("│ Payload"),
+        "expected pretty correlation output to include an in-table payload column, got:\n{pretty_stdout}"
     );
     assert!(
-        pretty_stdout
-            .contains("Image: C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe"),
+        pretty_stdout.contains("DestinationIp: null"),
+        "expected pretty correlation output to include selected contributing-event data in the payload column, got:\n{pretty_stdout}"
+    );
+    assert!(
+        pretty_stdout.contains("Image:") && pretty_stdout.contains("WindowsPowerShell"),
         "expected selected Image field in pretty correlation output, got:\n{pretty_stdout}"
     );
     assert!(
-        pretty_stdout.contains(
-            "... 2 more contributing event(s); increase --correlation-event-limit to show more"
-        ),
+        pretty_stdout.contains("... 2 more")
+            && pretty_stdout.contains("contributing event(s)")
+            && pretty_stdout.contains("correlation-event-limit"),
         "expected pretty correlation output to bound event details, got:\n{pretty_stdout}"
     );
 }

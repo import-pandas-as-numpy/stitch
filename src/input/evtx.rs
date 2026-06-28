@@ -74,3 +74,45 @@ pub fn read_evtx_events_with_errors(
 
     Ok(stats)
 }
+
+pub fn read_evtx_records_with_errors(
+    input: &DiscoveredInput,
+    strict: bool,
+    mut on_error: impl FnMut(&EvtxRecordError),
+) -> Result<EvtxReadStats, EvtxReadError> {
+    let mut parser = EvtxParser::from_path(&input.path).map_err(|error| EvtxReadError::Open {
+        path: input.path.display().to_string(),
+        message: error.to_string(),
+    })?;
+    let mut stats = EvtxReadStats::default();
+
+    for record in parser.records_json_bytes() {
+        match record {
+            Ok(_) => {
+                stats.records_seen += 1;
+            }
+            Err(error) => {
+                stats.records_failed += 1;
+
+                if strict {
+                    return Err(EvtxReadError::Record {
+                        path: input.path.display().to_string(),
+                        message: error.to_string(),
+                    });
+                }
+
+                let error = EvtxRecordError {
+                    path: input.path.display().to_string(),
+                    message: error.to_string(),
+                };
+                on_error(&error);
+
+                if stats.error_samples.len() < MAX_ERROR_SAMPLES {
+                    stats.error_samples.push(error);
+                }
+            }
+        }
+    }
+
+    Ok(stats)
+}

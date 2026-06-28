@@ -249,18 +249,32 @@ Options:
 --correlation-lateness <DUR>   Event-time tolerance, default 2m
 --correlation-max-state <N>    Max correlation state entries per rule
 --format <FORMAT>              pretty, compact, json, jsonl, csv, timeline
+--full                         Print expanded pretty tables with full payload content
 --output <FILE>                Write results to file
 --min-level <LEVEL>            Minimum Sigma level
 --summary                      Print rule/file summary after results
 ```
 
-Default output should be a compact readable table grouped by hit:
+Default output is a compact readable table grouped by hit, inspired by
+Chainsaw's detection tables. The table keeps the analyst scan path stable:
+timestamp, detections, event ID/record ID, level, host, and payload. Payload
+values are wrapped and truncated inside table cells. `--full` expands the pretty
+table with source columns such as channel and file, and disables payload
+truncation while still letting the table renderer own wrapping. Newlines from
+event content are normalized before rendering, and wrapping is applied after
+column widths are computed.
 
 ```text
-2026-06-27T12:10:44Z  HIGH  Security  4625  Failed Logon From Public IP
-  host: WIN-01  user: alice  src_ip: 203.0.113.10
-  file: Security.evtx  record: 88421
+┌──────────────────────┬────────────────────────────┬────────────┬───────┬────────┬──────────────────────────────┐
+│ Timestamp            │ Detections                 │ Event      │ Level │ Host   │ Payload                      │
+├──────────────────────┼────────────────────────────┼────────────┼───────┼────────┼──────────────────────────────┤
+│ 2026-06-27T12:10:44Z │ Failed Logon From Public IP │ 4625/88421 │ high  │ WIN-01 │ TargetUserName: alice :: ... │
+└──────────────────────┴────────────────────────────┴────────────┴───────┴────────┴──────────────────────────────┘
 ```
+
+Correlation rules use the same in-table shape, but their payload is defined by
+`--correlation-event-field` selections and bounded by
+`--correlation-event-limit`.
 
 Hunt execution model:
 
@@ -304,6 +318,11 @@ In non-strict mode, `--errors` writes one JSON object per skipped parse error:
 ```
 
 Recommended query language: Stitch Query Language (`stql`).
+
+When no `| keep` pipeline or `--fields` projection is supplied, pretty search
+output includes the full raw event record in a YAML-like nested block. When a
+projection is supplied, pretty output keeps the same metadata header and only
+prints the selected fields.
 
 Rationale:
 
@@ -373,10 +392,9 @@ stitch dump -i <PATH> --format <FORMAT> [OPTIONS]
 Options:
 
 ```text
---format <FORMAT>              jsonl, json, csv, xml
+--format <FORMAT>              jsonl, json, csv
 --output <PATH>                Output file or directory
 --fields <FIELD>...            Field projection
---flatten                      Flatten nested fields for CSV
 --raw                          Preserve raw parsed event shape
 --compact                      Compact JSON output
 --pretty                       Pretty JSON output
@@ -396,7 +414,8 @@ Speed-first behavior:
 2. Avoid pretty formatting unless requested.
 3. Stream output records.
 4. Use buffered writes.
-5. For CSV, compute headers from projection when supplied; otherwise perform a bounded schema discovery pass or require `--fields`.
+5. For CSV, require explicit `--fields` and compute headers from that projection. Automatic schema discovery is deferred to avoid buffering or a discovery pass.
+6. XML output is intentionally out of scope for the MVP because the current parser path already provides structured JSON values and XML is not needed for the initial workflows.
 
 ## 6. Sigma Support
 
@@ -513,22 +532,26 @@ path discovery
 
 Initial strategy:
 
-1. Parallelize across files.
+1. Parallelize across files by default when more than one input file is available.
 2. Within very large files, rely on parser streaming first; evaluate chunk-level parallelism later if the parser backend safely supports it.
 3. Use bounded channels to avoid unbounded memory growth.
 4. Keep output writing single-owner for deterministic formatting.
+5. Keep correlation-enabled hunt sequential until cross-file event ordering, watermarks, and bounded state are explicitly designed for concurrent ingestion.
+6. Use `--jobs 0` as the default system-sized worker pool and `--jobs 1` as the explicit sequential mode.
+7. Use `--jobs 1` as the deterministic low-concurrency baseline in tests.
 
 ### 7.3 Fast Paths
 
 Fast paths to implement early:
 
-1. Timestamp bounds.
-2. Channel filter.
-3. Event ID filter.
-4. Provider filter.
-5. Computer filter.
-6. Keyword prefilter for literal string rules.
-7. Field projection for dump and search output.
+1. Timestamp bounds. Initial STQL and Sigma metadata prefilters implemented for safe required predicates.
+2. Channel filter. Initial STQL and Sigma metadata prefilters implemented for safe required predicates.
+3. Event ID filter. Initial STQL and Sigma metadata prefilters implemented for safe required predicates.
+4. Provider filter. Initial STQL and Sigma metadata prefilters implemented for safe required predicates.
+5. Computer filter. Initial STQL and Sigma metadata prefilters implemented for safe required predicates.
+6. Common Windows Sigma `logsource.service` values compile to channel prefilters; unknown services remain unfiltered.
+7. Keyword prefilter for literal string rules.
+8. Field projection for dump and search output.
 
 ### 7.4 Benchmark Targets
 
@@ -555,6 +578,8 @@ Initial benchmark scenarios:
 ## 8. Output Design
 
 ### 8.1 Human Output
+
+See `docs/output.md` for current command examples and output-mode guidance.
 
 Human output should:
 
@@ -734,9 +759,9 @@ Acceptance:
 ### Milestone 4: Dump MVP
 
 1. Stream EVTX records to JSONL.
-2. Add JSON, CSV, and XML output options.
+2. Add JSON and projected CSV output options.
 3. Add field projection.
-4. Add `--raw`, `--flatten`, `--compact`, and `--pretty`.
+4. Add `--raw`, `--compact`, and `--pretty`.
 5. Add speed-first buffered output paths.
 
 Acceptance:

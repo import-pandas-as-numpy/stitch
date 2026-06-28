@@ -153,6 +153,24 @@ Usage notes:
 1. Use typed errors for expected failure modes.
 2. Preserve source errors where useful.
 
+### `rayon`
+
+Purpose: file-level parallel processing for EVTX workloads.
+
+Justification:
+
+1. Widely adopted Rust data-parallelism library.
+2. Uses work-stealing thread pools with a small, focused API.
+3. Lets `stitch` parallelize independent per-file parsing and evaluation without hand-rolled worker lifecycle code.
+4. Supports local thread pools, which keeps `--jobs` behavior explicit and avoids hidden global worker configuration.
+
+Usage notes:
+
+1. Parallelize across files first; do not split individual EVTX files until the parser backend is reviewed for safe chunk-level processing.
+2. Preserve deterministic output by collecting per-file results and merging them in discovery order.
+3. Keep Sigma correlation hunts sequential until cross-file ordering, watermarks, and bounded state are designed for concurrent ingestion.
+4. Tests that exercise Rayon paths must run the CLI under a timeout and kill the child process on timeout to avoid deadlocked test hangs.
+
 ## Development Dependencies
 
 ### `tempfile`

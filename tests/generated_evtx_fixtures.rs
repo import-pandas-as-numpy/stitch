@@ -1,7 +1,636 @@
-use std::process::Command;
+use std::{
+    fs,
+    process::{Command, Output, Stdio},
+    thread,
+    time::{Duration, Instant},
+};
 
 fn stitch() -> Command {
     Command::new(env!("CARGO_BIN_EXE_stitch"))
+}
+
+fn run_with_timeout(mut command: Command, timeout: Duration) -> Output {
+    command.stdout(Stdio::piped()).stderr(Stdio::piped());
+    let mut child = command.spawn().expect("stitch process should spawn");
+    let started = Instant::now();
+
+    loop {
+        if child
+            .try_wait()
+            .expect("stitch process status should be readable")
+            .is_some()
+        {
+            return child
+                .wait_with_output()
+                .expect("stitch output should be readable");
+        }
+
+        if started.elapsed() >= timeout {
+            child
+                .kill()
+                .expect("timed out stitch process should be killed");
+            let output = child
+                .wait_with_output()
+                .expect("timed out stitch output should be readable");
+            panic!(
+                "stitch command timed out after {timeout:?}\nstdout:\n{}\nstderr:\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+
+        thread::sleep(Duration::from_millis(25));
+    }
+}
+
+fn repeated_paths_file(paths: &[&str], repetitions: usize) -> tempfile::NamedTempFile {
+    let file = tempfile::NamedTempFile::new().expect("path list file should be created");
+    let body = (0..repetitions)
+        .flat_map(|_| paths.iter().copied())
+        .collect::<Vec<_>>()
+        .join("\n");
+    fs::write(file.path(), format!("{body}\n")).expect("path list should be written");
+    file
+}
+
+#[test]
+fn search_parallel_jobs_match_single_worker_with_timeout() {
+    let paths = repeated_paths_file(
+        &[
+            "tests/fixtures/evtx/security-auth.evtx",
+            "tests/fixtures/evtx/sysmon-activity.evtx",
+            "tests/fixtures/evtx/wmi-activity.evtx",
+            "tests/fixtures/evtx/task-scheduler-operational.evtx",
+        ],
+        12,
+    );
+
+    let mut single = stitch();
+    single.args([
+        "-j",
+        "1",
+        "--paths-from",
+        paths.path().to_str().expect("temp path should be UTF-8"),
+        "search",
+        "--query",
+        "event.id in (4624, 4104, 4688, 5861, 200)",
+        "--fields",
+        "timestamp",
+        "--fields",
+        "event.id",
+        "--fields",
+        "computer",
+        "--format",
+        "jsonl",
+        "--stats",
+    ]);
+    let single_output = run_with_timeout(single, Duration::from_secs(10));
+
+    assert!(
+        single_output.status.success(),
+        "single-worker search failed: {}",
+        String::from_utf8_lossy(&single_output.stderr)
+    );
+
+    let mut parallel = stitch();
+    parallel.args([
+        "-j",
+        "4",
+        "--paths-from",
+        paths.path().to_str().expect("temp path should be UTF-8"),
+        "search",
+        "--query",
+        "event.id in (4624, 4104, 4688, 5861, 200)",
+        "--fields",
+        "timestamp",
+        "--fields",
+        "event.id",
+        "--fields",
+        "computer",
+        "--format",
+        "jsonl",
+        "--stats",
+    ]);
+    let parallel_output = run_with_timeout(parallel, Duration::from_secs(10));
+
+    assert!(
+        parallel_output.status.success(),
+        "parallel search failed: {}",
+        String::from_utf8_lossy(&parallel_output.stderr)
+    );
+    assert_eq!(
+        String::from_utf8(single_output.stdout).expect("single output should be UTF-8"),
+        String::from_utf8(parallel_output.stdout).expect("parallel output should be UTF-8"),
+        "parallel search output should match single-worker output"
+    );
+}
+
+#[test]
+fn dump_parallel_jobs_match_single_worker_with_timeout() {
+    let paths = repeated_paths_file(
+        &[
+            "tests/fixtures/evtx/security-auth.evtx",
+            "tests/fixtures/evtx/sysmon-activity.evtx",
+            "tests/fixtures/evtx/defender-operational.evtx",
+        ],
+        16,
+    );
+
+    let mut single = stitch();
+    single.args([
+        "-j",
+        "1",
+        "--paths-from",
+        paths.path().to_str().expect("temp path should be UTF-8"),
+        "dump",
+        "--format",
+        "csv",
+        "--fields",
+        "timestamp",
+        "--fields",
+        "event.id",
+        "--fields",
+        "computer",
+        "--stats",
+    ]);
+    let single_output = run_with_timeout(single, Duration::from_secs(10));
+
+    assert!(
+        single_output.status.success(),
+        "single-worker dump failed: {}",
+        String::from_utf8_lossy(&single_output.stderr)
+    );
+
+    let mut parallel = stitch();
+    parallel.args([
+        "-j",
+        "4",
+        "--paths-from",
+        paths.path().to_str().expect("temp path should be UTF-8"),
+        "dump",
+        "--format",
+        "csv",
+        "--fields",
+        "timestamp",
+        "--fields",
+        "event.id",
+        "--fields",
+        "computer",
+        "--stats",
+    ]);
+    let parallel_output = run_with_timeout(parallel, Duration::from_secs(10));
+
+    assert!(
+        parallel_output.status.success(),
+        "parallel dump failed: {}",
+        String::from_utf8_lossy(&parallel_output.stderr)
+    );
+    assert_eq!(
+        String::from_utf8(single_output.stdout).expect("single output should be UTF-8"),
+        String::from_utf8(parallel_output.stdout).expect("parallel output should be UTF-8"),
+        "parallel dump output should match single-worker output"
+    );
+}
+
+#[test]
+fn dump_reports_output_file_create_errors() {
+    let directory = tempfile::tempdir().expect("tempdir should be created");
+    let output_path = directory.path().join("missing-parent").join("dump.jsonl");
+    let output = stitch()
+        .args([
+            "dump",
+            "-i",
+            "tests/fixtures/evtx/security-auth.evtx",
+            "--output",
+            output_path.to_str().expect("temp path should be UTF-8"),
+        ])
+        .output()
+        .expect("stitch dump should run");
+
+    assert!(
+        !output.status.success(),
+        "dump should fail when output parent directory does not exist"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("failed to create dump output file") && stderr.contains("missing-parent"),
+        "dump should report output create path and cause, got:\n{stderr}"
+    );
+}
+
+#[test]
+fn search_reports_error_file_create_errors() {
+    let directory = tempfile::tempdir().expect("tempdir should be created");
+    let errors_path = directory.path().join("missing-parent").join("errors.jsonl");
+    let output = stitch()
+        .args([
+            "search",
+            "-i",
+            "tests/fixtures/evtx/security-auth.evtx",
+            "--query",
+            "event.id == 4625",
+            "--errors",
+            errors_path.to_str().expect("temp path should be UTF-8"),
+        ])
+        .output()
+        .expect("stitch search should run");
+
+    assert!(
+        !output.status.success(),
+        "search should fail when errors-file parent directory does not exist"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("failed to create parse errors file") && stderr.contains("missing-parent"),
+        "search should report errors-file create path and cause, got:\n{stderr}"
+    );
+}
+
+#[test]
+fn parallel_search_reports_malformed_evtx_without_hanging() {
+    let directory = tempfile::tempdir().expect("tempdir should be created");
+    let bad_evtx = directory.path().join("bad.evtx");
+    fs::write(&bad_evtx, b"not an evtx file").expect("bad EVTX fixture should be written");
+    let paths = repeated_paths_file(
+        &[
+            "tests/fixtures/evtx/security-auth.evtx",
+            bad_evtx.to_str().expect("temp path should be UTF-8"),
+            "tests/fixtures/evtx/sysmon-activity.evtx",
+        ],
+        4,
+    );
+    let mut command = stitch();
+    command.args([
+        "-j",
+        "4",
+        "--paths-from",
+        paths.path().to_str().expect("temp path should be UTF-8"),
+        "search",
+        "--query",
+        "event.id >= 0",
+        "--format",
+        "jsonl",
+        "--stats",
+    ]);
+
+    let output = run_with_timeout(command, Duration::from_secs(10));
+
+    assert!(
+        !output.status.success(),
+        "parallel search should fail on malformed EVTX input"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("failed to open EVTX file") && stderr.contains("bad.evtx"),
+        "parallel malformed EVTX failure should include path context, got:\n{stderr}"
+    );
+}
+
+#[test]
+fn dump_jsonl_streams_generated_evtx_records() {
+    let output = stitch()
+        .args(["dump", "-i", "tests/fixtures/evtx/security-auth.evtx"])
+        .output()
+        .expect("stitch dump should run against generated Security EVTX fixture");
+
+    assert!(
+        output.status.success(),
+        "stitch dump failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8(output.stdout).expect("dump output should be valid UTF-8 JSONL");
+    let lines = stdout.lines().collect::<Vec<_>>();
+
+    assert_eq!(lines.len(), 5, "expected one JSONL row per EVTX record");
+
+    let first: serde_json::Value =
+        serde_json::from_str(lines[0]).expect("dump line should be valid JSON");
+    assert_eq!(first["event_id"], 4624);
+    assert_eq!(first["computer"], "LAB-WKS-001");
+    assert!(
+        first.get("raw").is_some(),
+        "default dump shape should include the raw event"
+    );
+}
+
+#[test]
+fn dump_jsonl_supports_field_projection_and_raw_output() {
+    let projected = stitch()
+        .args([
+            "dump",
+            "-i",
+            "tests/fixtures/evtx/security-auth.evtx",
+            "--fields",
+            "Event.EventData.TargetUserName",
+            "--fields",
+            "computer",
+        ])
+        .output()
+        .expect("stitch dump should run with field projection");
+
+    assert!(
+        projected.status.success(),
+        "projected dump failed: {}",
+        String::from_utf8_lossy(&projected.stderr)
+    );
+
+    let projected_stdout =
+        String::from_utf8(projected.stdout).expect("projected dump should be UTF-8");
+    let first_projected: serde_json::Value = serde_json::from_str(
+        projected_stdout
+            .lines()
+            .next()
+            .expect("dump should emit a row"),
+    )
+    .expect("projected dump line should be JSON");
+
+    assert_eq!(first_projected["fields"]["computer"], "LAB-WKS-001");
+    assert!(
+        first_projected.get("raw").is_none(),
+        "projected dump should omit raw event payloads"
+    );
+
+    let raw = stitch()
+        .args([
+            "dump",
+            "-i",
+            "tests/fixtures/evtx/security-auth.evtx",
+            "--raw",
+        ])
+        .output()
+        .expect("stitch dump should run with raw output");
+
+    assert!(
+        raw.status.success(),
+        "raw dump failed: {}",
+        String::from_utf8_lossy(&raw.stderr)
+    );
+
+    let raw_stdout = String::from_utf8(raw.stdout).expect("raw dump should be UTF-8");
+    let first_raw: serde_json::Value =
+        serde_json::from_str(raw_stdout.lines().next().expect("dump should emit a row"))
+            .expect("raw dump line should be JSON");
+
+    assert!(first_raw.get("Event").is_some());
+    assert!(
+        first_raw.get("source").is_none(),
+        "raw dump should preserve only the parsed raw EVTX shape"
+    );
+}
+
+#[test]
+fn dump_jsonl_can_write_to_output_file() {
+    let directory = tempfile::tempdir().expect("tempdir should be created");
+    let output_path = directory.path().join("security-auth.jsonl");
+    let output = stitch()
+        .args([
+            "dump",
+            "-i",
+            "tests/fixtures/evtx/security-auth.evtx",
+            "--output",
+            output_path.to_str().expect("temp path should be UTF-8"),
+            "--stats",
+        ])
+        .output()
+        .expect("stitch dump should write JSONL to a file");
+
+    assert!(
+        output.status.success(),
+        "file dump failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8(output.stdout).expect("stats output should be UTF-8");
+    assert!(
+        stdout.contains("stats: dumped=5 parse_errors=0 inputs=1"),
+        "expected dump stats on stdout, got:\n{stdout}"
+    );
+
+    let file_output = fs::read_to_string(output_path).expect("dump output file should be readable");
+    assert_eq!(
+        file_output.lines().count(),
+        5,
+        "output file should contain one JSONL row per EVTX record"
+    );
+}
+
+#[test]
+fn dump_json_emits_array_output() {
+    let output = stitch()
+        .args([
+            "dump",
+            "-i",
+            "tests/fixtures/evtx/security-auth.evtx",
+            "--format",
+            "json",
+            "--fields",
+            "computer",
+            "--compact",
+        ])
+        .output()
+        .expect("stitch dump should emit JSON array output");
+
+    assert!(
+        output.status.success(),
+        "JSON dump failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8(output.stdout).expect("JSON dump should be UTF-8");
+    let value: serde_json::Value =
+        serde_json::from_str(&stdout).expect("dump --format json should emit valid JSON");
+    let records = value
+        .as_array()
+        .expect("JSON dump output should be an array");
+
+    assert_eq!(records.len(), 5);
+    assert_eq!(records[0]["event_id"], 4624);
+    assert_eq!(records[0]["fields"]["computer"], "LAB-WKS-001");
+}
+
+#[test]
+fn dump_json_can_write_pretty_array_to_output_file() {
+    let directory = tempfile::tempdir().expect("tempdir should be created");
+    let output_path = directory.path().join("security-auth.json");
+    let output = stitch()
+        .args([
+            "dump",
+            "-i",
+            "tests/fixtures/evtx/security-auth.evtx",
+            "--format",
+            "json",
+            "--pretty",
+            "--raw",
+            "--output",
+            output_path.to_str().expect("temp path should be UTF-8"),
+            "--stats",
+        ])
+        .output()
+        .expect("stitch dump should write JSON array output to a file");
+
+    assert!(
+        output.status.success(),
+        "JSON file dump failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8(output.stdout).expect("stats output should be UTF-8");
+    assert!(
+        stdout.contains("stats: dumped=5 parse_errors=0 inputs=1"),
+        "expected dump stats on stdout, got:\n{stdout}"
+    );
+
+    let file_output = fs::read_to_string(output_path).expect("JSON output file should be readable");
+    assert!(
+        file_output.contains('\n'),
+        "pretty JSON output should contain newlines"
+    );
+
+    let value: serde_json::Value =
+        serde_json::from_str(&file_output).expect("output file should contain valid JSON");
+    assert_eq!(
+        value
+            .as_array()
+            .expect("JSON output should be an array")
+            .len(),
+        5
+    );
+}
+
+#[test]
+fn dump_csv_requires_explicit_fields() {
+    let output = stitch()
+        .args([
+            "dump",
+            "-i",
+            "tests/fixtures/evtx/security-auth.evtx",
+            "--format",
+            "csv",
+        ])
+        .output()
+        .expect("stitch dump should reject CSV without fields");
+
+    assert!(
+        !output.status.success(),
+        "CSV dump without fields should fail"
+    );
+
+    let stderr = String::from_utf8(output.stderr).expect("stderr should be UTF-8");
+    assert!(
+        stderr.contains("dump --format csv requires at least one --fields value"),
+        "expected clear CSV projection error, got:\n{stderr}"
+    );
+}
+
+#[test]
+fn dump_csv_rejects_raw_mode() {
+    let output = stitch()
+        .args([
+            "dump",
+            "-i",
+            "tests/fixtures/evtx/security-auth.evtx",
+            "--format",
+            "csv",
+            "--fields",
+            "computer",
+            "--raw",
+        ])
+        .output()
+        .expect("stitch dump should reject CSV raw mode");
+
+    assert!(!output.status.success(), "CSV raw dump should fail");
+
+    let stderr = String::from_utf8(output.stderr).expect("stderr should be UTF-8");
+    assert!(
+        stderr.contains("dump --format csv does not support --raw"),
+        "expected clear CSV raw-mode error, got:\n{stderr}"
+    );
+}
+
+#[test]
+fn dump_csv_emits_projected_rows() {
+    let output = stitch()
+        .args([
+            "dump",
+            "-i",
+            "tests/fixtures/evtx/security-auth.evtx",
+            "--format",
+            "csv",
+            "--fields",
+            "timestamp",
+            "--fields",
+            "event.id",
+            "--fields",
+            "computer",
+        ])
+        .output()
+        .expect("stitch dump should emit projected CSV");
+
+    assert!(
+        output.status.success(),
+        "CSV dump failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8(output.stdout).expect("CSV output should be UTF-8");
+    let lines = stdout.lines().collect::<Vec<_>>();
+
+    assert_eq!(
+        lines.len(),
+        6,
+        "CSV should include one header and five rows"
+    );
+    assert_eq!(lines[0], "timestamp,event.id,computer");
+    assert!(
+        lines[1].contains("2026-01-15T10:00:00.000000Z,4624,LAB-WKS-001"),
+        "expected projected CSV row, got:\n{stdout}"
+    );
+}
+
+#[test]
+fn dump_csv_escapes_quoted_fields_and_writes_to_output_file() {
+    let directory = tempfile::tempdir().expect("tempdir should be created");
+    let output_path = directory.path().join("security-auth.csv");
+    let output = stitch()
+        .args([
+            "dump",
+            "-i",
+            "tests/fixtures/evtx/security-auth.evtx",
+            "--format",
+            "csv",
+            "--fields",
+            "Event.EventData.ProcessName",
+            "--fields",
+            "missing,field",
+            "--output",
+            output_path.to_str().expect("temp path should be UTF-8"),
+            "--stats",
+        ])
+        .output()
+        .expect("stitch dump should write projected CSV to a file");
+
+    assert!(
+        output.status.success(),
+        "CSV file dump failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8(output.stdout).expect("stats output should be UTF-8");
+    assert!(
+        stdout.contains("stats: dumped=5 parse_errors=0 inputs=1"),
+        "expected dump stats on stdout, got:\n{stdout}"
+    );
+
+    let file_output = fs::read_to_string(output_path).expect("CSV output file should be readable");
+    assert!(
+        file_output.starts_with("Event.EventData.ProcessName,\"missing,field\""),
+        "expected CSV header quoting for comma-containing field names, got:\n{file_output}"
+    );
+    assert!(
+        file_output.contains("C:\\Windows\\System32\\runas.exe,"),
+        "expected projected CSV row with missing fields as empty values, got:\n{file_output}"
+    );
 }
 
 #[test]

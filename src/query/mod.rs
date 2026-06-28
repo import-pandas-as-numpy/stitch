@@ -21,6 +21,7 @@ pub enum Expr {
 pub struct SearchQuery {
     pub filter: Expr,
     pub keep_fields: Vec<String>,
+    prefilter: MetadataPrefilter,
 }
 
 #[derive(Debug, Clone)]
@@ -124,10 +125,26 @@ pub fn parse_search_query(query: &str) -> Result<SearchQuery, QueryError> {
     };
     parser.expect_end()?;
 
+    let prefilter = MetadataPrefilter::from_expr(&filter);
+
     Ok(SearchQuery {
         filter,
         keep_fields,
+        prefilter,
     })
+}
+
+impl SearchQuery {
+    #[must_use]
+    pub fn matches(&self, event: &Event) -> bool {
+        self.prefilter.matches(event) && self.filter.evaluate(event)
+    }
+
+    #[cfg(test)]
+    #[must_use]
+    pub fn prefilter_count(&self) -> usize {
+        self.prefilter.conditions.len()
+    }
 }
 
 impl Expr {
@@ -143,6 +160,78 @@ impl Expr {
             Self::Or(left, right) => left.evaluate(event) || right.evaluate(event),
         }
     }
+}
+
+#[derive(Debug, Clone, Default)]
+struct MetadataPrefilter {
+    conditions: Vec<Comparison>,
+}
+
+impl MetadataPrefilter {
+    fn from_expr(expression: &Expr) -> Self {
+        let mut conditions = Vec::new();
+        collect_metadata_prefilters(expression, &mut conditions);
+        Self { conditions }
+    }
+
+    fn matches(&self, event: &Event) -> bool {
+        self.conditions
+            .iter()
+            .all(|condition| condition.evaluate(event))
+    }
+}
+
+fn collect_metadata_prefilters(expression: &Expr, conditions: &mut Vec<Comparison>) {
+    match expression {
+        Expr::Comparison(comparison) if is_metadata_prefilter(comparison) => {
+            conditions.push(comparison.clone());
+        }
+        Expr::And(left, right) => {
+            collect_metadata_prefilters(left, conditions);
+            collect_metadata_prefilters(right, conditions);
+        }
+        Expr::Comparison(_)
+        | Expr::Regex(_)
+        | Expr::Exists(_)
+        | Expr::CidrContains(_)
+        | Expr::Not(_)
+        | Expr::Or(_, _) => {}
+    }
+}
+
+fn is_metadata_prefilter(comparison: &Comparison) -> bool {
+    is_prefilter_field(&comparison.field)
+        && matches!(
+            comparison.operator,
+            Operator::Eq
+                | Operator::Lt
+                | Operator::Lte
+                | Operator::Gt
+                | Operator::Gte
+                | Operator::In
+        )
+}
+
+fn is_prefilter_field(field: &str) -> bool {
+    matches!(
+        field,
+        "timestamp"
+            | "event.timestamp"
+            | "winlog.timestamp"
+            | "channel"
+            | "event.channel"
+            | "winlog.channel"
+            | "provider"
+            | "event.provider"
+            | "winlog.provider_name"
+            | "event.id"
+            | "event_id"
+            | "winlog.event_id"
+            | "computer"
+            | "host"
+            | "host.name"
+            | "source.computer"
+    )
 }
 
 impl CidrContains {
@@ -975,6 +1064,54 @@ mod tests {
     }
 
     #[test]
+    fn search_query_extracts_safe_metadata_prefilters() {
+        let query = parse_search_query(
+            "timestamp >= \"2026-06-27T00:00:00Z\" and event.id in (4624, 4625) \
+             and channel == \"Security\" and Event.EventData.TargetUserName contains \"admin\"",
+        )
+        .expect("query should parse");
+
+        assert_eq!(
+            query.prefilter_count(),
+            3,
+            "timestamp, event id, and channel should become metadata prefilters"
+        );
+        assert!(
+            query.matches(&rich_test_event()),
+            "metadata prefilters should preserve matching query behavior"
+        );
+    }
+
+    #[test]
+    fn search_query_does_not_prefilter_or_or_not_branches() {
+        let or_query = parse_search_query(
+            "event.id == 1 or Event.EventData.TargetUserName == \"alice.admin\"",
+        )
+        .expect("query should parse");
+        let not_query = parse_search_query("not event.id == 1 and channel == \"Security\"")
+            .expect("query should parse");
+
+        assert_eq!(
+            or_query.prefilter_count(),
+            0,
+            "or metadata branches should not be extracted because they are not required globally"
+        );
+        assert_eq!(
+            not_query.prefilter_count(),
+            1,
+            "safe sibling metadata predicates can still be extracted beside a not branch"
+        );
+        assert!(
+            or_query.matches(&rich_test_event()),
+            "query with skipped or prefilter should still match through full evaluation"
+        );
+        assert!(
+            not_query.matches(&rich_test_event()),
+            "query with a skipped not branch should still match through full evaluation"
+        );
+    }
+
+    #[test]
     fn evaluates_all_comparison_operators_and_literal_forms() {
         let event = rich_test_event();
         let matching_statements = [
@@ -1371,10 +1508,7 @@ mod tests {
     }
 
     fn test_event(raw: serde_json::Value) -> Event {
-        let input = DiscoveredInput {
-            path: PathBuf::from("fixture.evtx"),
-            collection_root: PathBuf::from("."),
-        };
+        let input = DiscoveredInput::new(PathBuf::from("fixture.evtx"), PathBuf::from("."));
 
         Event::from_raw(&input, None, raw)
     }
