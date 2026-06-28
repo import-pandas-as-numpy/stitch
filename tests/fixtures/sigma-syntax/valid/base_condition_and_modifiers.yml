@@ -1,0 +1,26 @@
+title: Syntax Fixture Base Rule With Modifiers
+name: syntax_base_modifiers
+id: 90000000-0000-0000-0000-000000000001
+status: test
+level: medium
+tags:
+  - test.syntax
+logsource:
+  product: windows
+  category: process_creation
+detection:
+  selection_process:
+    EventID: 1
+    Image|endswith: '\powershell.exe'
+    CommandLine|contains|all:
+      - '-NoProfile'
+      - 'DownloadString'
+  selection_network:
+    DestinationIp|cidr:
+      - 203.0.113.0/24
+      - 2001:db8::/32
+  filter_known_good:
+    ParentImage|contains: '\Windows\System32\'
+  condition:
+    - selection_process and not filter_known_good
+    - selection_network

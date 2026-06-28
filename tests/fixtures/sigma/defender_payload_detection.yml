@@ -1,0 +1,14 @@
+title: Synthetic Defender Payload Detection
+id: 00000000-0000-4000-8000-000000000104
+status: test
+level: high
+tags:
+  - attack.defense_evasion
+logsource:
+  product: windows
+  service: windefend
+detection:
+  selection:
+    EventID: 1116
+    Path|contains: PAYLOAD.BIN
+  condition: selection

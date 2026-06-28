@@ -1,0 +1,28 @@
+# Rust build output
+/target/
+
+# Local benchmark output
+/target/benchmarks/
+
+# Static docs build output
+/site/dist/
+
+# Vercel local project metadata and pulled environment files
+/.vercel/
+
+# Local environment files
+.env
+.env.*
+!.env.example
+
+# Editor and OS metadata
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+*~
+
+# Local logs and scratch files
+*.log
+*.tmp
+*.bak

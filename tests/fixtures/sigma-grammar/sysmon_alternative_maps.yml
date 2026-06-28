@@ -1,0 +1,13 @@
+title: Synthetic Sysmon Alternative Map Grammar Rule
+id: 00000000-0000-4000-8000-000000000202
+status: test
+level: medium
+logsource:
+  product: windows
+detection:
+  selection:
+    - EventID: 1
+      Image|endswith: missing.exe
+    - EventID: 11
+      TargetFilename: '*payload.bin'
+  condition: selection

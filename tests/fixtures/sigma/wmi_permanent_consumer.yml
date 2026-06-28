@@ -1,0 +1,14 @@
+title: Synthetic WMI Permanent Consumer
+id: 00000000-0000-4000-8000-000000000102
+status: test
+level: medium
+tags:
+  - attack.persistence
+logsource:
+  product: windows
+  service: wmi
+detection:
+  selection:
+    EventID: 5861
+    CONSUMER|contains: ExampleInventoryConsumer
+  condition: selection

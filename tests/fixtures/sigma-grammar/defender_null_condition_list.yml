@@ -1,0 +1,16 @@
+title: Synthetic Defender Null Condition List Grammar Rule
+id: 00000000-0000-4000-8000-000000000203
+status: test
+level: high
+logsource:
+  product: windows
+detection:
+  defender_detection:
+    EventID: 1116
+    OptionalField: null
+  defender_cleanup:
+    EventID: 1117
+    OptionalField: null
+  condition:
+    - defender_detection
+    - defender_cleanup

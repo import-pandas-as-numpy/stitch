@@ -1,0 +1,8 @@
+title: Invalid Unknown Selection
+name: invalid_unknown_selection
+logsource:
+  product: windows
+detection:
+  selection:
+    EventID: 4688
+  condition: selection and missing_selection
