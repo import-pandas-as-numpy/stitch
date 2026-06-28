@@ -11,6 +11,7 @@ PYTHONPATH=../weave python3 -m weave tests/fixtures/source/security-auth.jsonl t
 PYTHONPATH=../weave python3 -m weave tests/fixtures/source/system-services.jsonl tests/fixtures/evtx/system-services.evtx --seed 1002
 PYTHONPATH=../weave python3 -m weave tests/fixtures/source/powershell-activity.jsonl tests/fixtures/evtx/powershell-activity.evtx --seed 1003
 PYTHONPATH=../weave python3 -m weave tests/fixtures/source/sysmon-activity.jsonl tests/fixtures/evtx/sysmon-activity.evtx --seed 1004
+PYTHONPATH=../weave python3 -m weave tests/fixtures/source/sysmon-correlation.jsonl tests/fixtures/correlation-evtx/sysmon-correlation.evtx --seed 1010
 PYTHONPATH=../weave python3 -m weave tests/fixtures/source/defender-operational.jsonl tests/fixtures/evtx/defender-operational.evtx --seed 1005
 PYTHONPATH=../weave python3 -m weave tests/fixtures/source/wmi-activity.jsonl tests/fixtures/evtx/wmi-activity.evtx --seed 1006
 PYTHONPATH=../weave python3 -m weave tests/fixtures/source/task-scheduler-operational.jsonl tests/fixtures/evtx/task-scheduler-operational.evtx --seed 1007
@@ -33,6 +34,10 @@ Fixture contents:
 7. `task-scheduler-operational.evtx`: scheduled task registration, update,
    action-start, and action-complete events.
 
+The `correlation-evtx` directory contains EVTX files generated for correlation
+tests. `sysmon-correlation.evtx` includes repeated `ProcessGuid` activity for
+Sigma event-count correlation coverage.
+
 The `collections/example-case` directory mirrors a small host-oriented case
 folder. It intentionally contains copies of selected generated EVTX files so
 recursive discovery can be tested against nested directories without changing
@@ -45,3 +50,12 @@ generated EVTX fixtures using common Windows field names such as `Image`,
 The `sigma-grammar` directory contains rules that exercise broader Sigma syntax
 such as keyword searches, lists of map alternatives, wildcard values, `null`,
 and condition lists.
+
+The `sigma-correlation` directory contains multi-document Sigma rules that pair
+base detections with event-count correlation documents.
+
+The `sigma-syntax` directory contains parser-focused Sigma fixtures. The
+`valid` subtree covers supported base-rule and correlation syntax. The `invalid`
+subtree covers malformed YAML, base Sigma typos, missing selections, unsupported
+modifiers, and malformed correlation definitions; tests load those files
+individually so expected diagnostics remain deterministic.

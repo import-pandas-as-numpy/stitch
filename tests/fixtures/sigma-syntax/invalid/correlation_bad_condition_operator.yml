@@ -1,0 +1,10 @@
+title: Invalid Correlation Bad Condition Operator
+name: invalid_correlation_bad_condition_operator
+type: correlation
+correlation:
+  type: event_count
+  rules:
+    - some_rule
+  timespan: 5m
+  condition:
+    approximately: 2

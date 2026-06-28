@@ -4,7 +4,7 @@ Status: Draft
 Last updated: 2026-06-28
 
 `stitch hunt` loads Sigma YAML rules from files or directories and evaluates the
-currently supported non-correlation detection subset against EVTX input.
+currently supported detection and correlation subset against EVTX input.
 
 ## Supported Rule Types
 
@@ -13,10 +13,14 @@ Supported:
 1. Regular Sigma rules with a `detection` mapping.
 2. Rules with named selections and a string `condition`.
 3. Rules with a list of condition strings, evaluated as OR.
+4. Multi-document Sigma YAML files.
+5. Sigma `event_count`, `value_count`, `temporal`, and `temporal_ordered`
+   correlation documents with `rules`, `group-by`, `condition`, and `timespan`.
 
 Skipped:
 
-1. Correlation rules are detected and counted as skipped.
+1. Correlation types other than `event_count`, `value_count`, `temporal`, and
+   `temporal_ordered` are rejected as unsupported.
 
 Unsupported rule shapes fail at load time with the rule path and a diagnostic.
 
@@ -38,6 +42,106 @@ all of them
 
 If `condition` is a YAML list, `stitch` evaluates the listed condition strings
 as an OR expression.
+
+## Correlation
+
+Initial correlation support is streaming and windowed. `event_count`
+correlation documents count matching base Sigma rule results over a `timespan`.
+`value_count` correlation documents count distinct values from the condition
+`field` over the same window. `temporal` correlation documents match when every
+referenced rule appears within the window. `temporal_ordered` additionally
+requires the listed `rules` order. Correlation matches are emitted when the
+correlation requirement is reached.
+
+Supported correlation condition operators:
+
+```text
+gt
+gte
+eq
+lte
+lt
+>
+>=
+==
+<=
+<
+```
+
+Examples:
+
+```yaml
+type: correlation
+correlation:
+  type: event_count
+  rules:
+    - failed_logon
+  group-by:
+    - TargetUserName
+  condition:
+    gte: 5
+  timespan: 10m
+```
+
+```yaml
+type: correlation
+correlation:
+  type: value_count
+  rules:
+    - failed_logon
+  group-by:
+    - TargetUserName
+  condition:
+    field: IpAddress
+    gte: 3
+  timespan: 10m
+```
+
+```yaml
+type: correlation
+correlation:
+  type: temporal_ordered
+  rules:
+    - process_start
+    - process_network
+    - process_file_write
+  group-by:
+    - ProcessGuid
+  timespan: 5m
+```
+
+Supported timespan suffixes:
+
+```text
+s
+m
+h
+d
+```
+
+`rules` entries can reference base rules by Sigma `name`, `id`, or `title`.
+`group-by` fields use the same EVTX field alias behavior as detections.
+Correlation state is scoped by `--correlation-scope`, defaulting to `host`.
+Use `--disable-correlation` to load only base detection rules.
+
+Correlation output always includes contributing event metadata such as
+timestamp, record ID, channel, event ID, computer, source file, and contributing
+base rule. To include selected event details, repeat
+`--correlation-event-field FIELD`. The field names use the same Sigma alias
+resolution as detections, so fields such as `Image`, `CommandLine`,
+`DestinationIp`, `TargetFilename`, and `Event.EventData.TargetUserName` work.
+
+Pretty correlation output prints at most `--correlation-event-limit` contributing
+events per correlation match when selected event fields are present. The default
+limit is `3`; set it to `0` to hide contributing-event details in pretty output.
+JSON and JSONL output include the selected fields for every contributing event.
+`stitch` intentionally stores only selected event fields in correlation state,
+not full raw EVTX payloads, to keep correlation memory bounded.
+
+`--correlation-max-state` bounds the number of active correlation state groups.
+When the limit is exceeded, `stitch` evicts the oldest state group by latest
+event timestamp. Hunt stats include `correlation_state` and
+`correlation_evicted` when correlation rules are loaded.
 
 ## Field Matching
 

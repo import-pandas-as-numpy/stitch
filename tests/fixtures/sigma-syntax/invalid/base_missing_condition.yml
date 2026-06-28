@@ -1,0 +1,7 @@
+title: Invalid Missing Detection Condition
+name: invalid_missing_condition
+logsource:
+  product: windows
+detection:
+  selection:
+    EventID: 4688

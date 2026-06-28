@@ -1,0 +1,102 @@
+---
+title: Syntax Fixture Process Start
+name: syntax_process_start
+id: 90000000-0000-0000-0000-000000000010
+status: test
+level: low
+logsource:
+  product: windows
+  category: process_creation
+detection:
+  selection:
+    EventID: 1
+    Image|endswith: '\cmd.exe'
+  condition: selection
+---
+title: Syntax Fixture Network Connect
+name: syntax_network_connect
+id: 90000000-0000-0000-0000-000000000011
+status: test
+level: low
+logsource:
+  product: windows
+  category: network_connection
+detection:
+  selection:
+    EventID: 3
+    DestinationHostname|contains: '.example.invalid'
+  condition: selection
+---
+title: Syntax Fixture File Create
+name: syntax_file_create
+id: 90000000-0000-0000-0000-000000000012
+status: test
+level: low
+logsource:
+  product: windows
+  category: file_event
+detection:
+  selection:
+    EventID: 11
+    TargetFilename|contains: '\Temp\'
+  condition: selection
+---
+title: Syntax Fixture Process Activity Count
+name: syntax_process_activity_count
+type: correlation
+status: test
+level: medium
+correlation:
+  type: event_count
+  rules:
+    - syntax_process_start
+  group-by:
+    - ProcessGuid
+    - Computer
+  timespan: 5m
+  condition:
+    gte: 2
+---
+title: Syntax Fixture Distinct Destination Count
+name: syntax_distinct_destination_count
+type: correlation
+status: test
+level: medium
+correlation:
+  type: value_count
+  rules:
+    - syntax_network_connect
+  group-by: ProcessGuid
+  timespan: 10m
+  condition:
+    field: DestinationHostname
+    gt: 1
+---
+title: Syntax Fixture Process Network File Sequence
+name: syntax_process_network_file_sequence
+type: correlation
+status: test
+level: high
+correlation:
+  type: temporal_ordered
+  rules:
+    - syntax_process_start
+    - syntax_network_connect
+    - syntax_file_create
+  group_by:
+    - ProcessGuid
+  timeframe: 15m
+---
+title: Syntax Fixture Unordered Process Activity
+name: syntax_unordered_process_activity
+type: correlation
+status: test
+level: medium
+correlation:
+  type: temporal
+  rules:
+    - syntax_process_start
+    - syntax_network_connect
+  group-by:
+    - ProcessGuid
+  timespan: 15m

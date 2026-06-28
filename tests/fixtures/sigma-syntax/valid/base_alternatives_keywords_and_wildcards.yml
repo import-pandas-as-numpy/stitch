@@ -1,0 +1,23 @@
+title: Syntax Fixture Alternatives Keywords And Wildcards
+name: syntax_alternatives_keywords
+id: 90000000-0000-0000-0000-000000000002
+status: test
+level: low
+tags:
+  - test.syntax
+logsource:
+  product: windows
+detection:
+  selection_maps:
+    - EventID:
+        - 4104
+        - 4103
+      ScriptBlockText|contains: 'Invoke-*'
+    - EventID: 22
+      QueryName: '*.example.invalid'
+  selection_keywords:
+    - 'encodedcommand'
+    - 'download cradle'
+  selection_null:
+    TargetUserName: null
+  condition: 1 of selection_*

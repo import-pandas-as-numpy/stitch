@@ -1,0 +1,8 @@
+title: Invalid Bad Condition Pattern
+name: invalid_bad_condition_pattern
+logsource:
+  product: windows
+detection:
+  selection:
+    EventID: 4688
+  condition: 1 of missing_*

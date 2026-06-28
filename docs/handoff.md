@@ -4,7 +4,7 @@ Last updated: 2026-06-28
 
 ## Current State
 
-Current milestone: Milestone 2, Hunt MVP Without Correlation.
+Current milestone: Milestone 3, Hunt With Correlation.
 
 Milestone 0 is functionally complete:
 
@@ -33,11 +33,11 @@ Search MVP is functionally complete for current purposes:
 7. Common CLI options are global and may appear before or after subcommands.
 8. Generated EVTX fixture integration tests now cover search against normalized metadata, raw EventData paths, projections, CIDR helpers, regex matching, limits, stats, and recursive discovery.
 
-Milestone 2 has started:
+Milestone 2 is functionally complete for the current supported subset:
 
 1. Sigma YAML loading uses `noyalib`, not deprecated `serde_yaml` or `serde_yml`.
 2. `hunt` loads `.yml` and `.yaml` rules from files or directories.
-3. Correlation rules are detected and counted as skipped.
+3. Multi-document Sigma files can contain base rules and correlation documents.
 4. `hunt` evaluates the first supported Sigma subset: field equality/list matching with boolean conditions over named selections.
 5. Supported Sigma modifiers currently include `contains`, `startswith`, `endswith`, `all`, `cased`, `re`, and `cidr`.
 6. Supported Sigma condition patterns include `1 of selection_*`, `all of selection_*`, and `1/all of them`.
@@ -47,6 +47,9 @@ Milestone 2 has started:
 10. `hunt` now applies `--rule-status`, `--level`, `--tag`, `--min-level`, and `--exclude-rule`.
 11. Sigma detection support now includes condition lists as OR, lists of maps as OR alternatives, keyword search identifiers, `|all` keyword lists, `null` field values, and `*`/`?` string wildcards.
 12. Non-correlation Sigma modifiers now cover `all`, `cased`, `contains`, `startswith`, `endswith`, `exists`, `neq`, `lt`, `lte`, `gt`, `gte`, `re` with `i/m/s`, `cidr`, `windash`, Base64/UTF-16 encodings, `fieldref`, and time extractors. `expand` is rejected because placeholder configuration is not implemented.
+13. Initial Sigma `event_count`, `value_count`, `temporal`, and `temporal_ordered` correlation support is implemented with grouped streaming windows, `condition` thresholds where applicable, `timespan`, rule references by `name`/`id`/`title`, `--correlation-scope`, and JSONL/pretty output.
+14. Parser-focused Sigma syntax fixtures now cover valid base rules, valid correlation rules, malformed base rules, malformed correlation rules, and broken YAML.
+15. Correlation output can include selected contributing-event fields with `--correlation-event-field`; pretty output bounds those details with `--correlation-event-limit`.
 
 ## Current `stql` Support
 
@@ -191,17 +194,15 @@ cargo clippy --all-targets --all-features -- -D warnings -W clippy::pedantic
 cargo test --all-targets --all-features
 ```
 
-Current test count: 61 unit tests and 12 integration tests passed.
+Current test count: 70 unit tests and 13 integration tests passed.
 
 ## Next Work
 
-Continue Milestone 2, Hunt MVP Without Correlation:
+Continue Milestone 3, Hunt With Correlation:
 
-1. Add more Sigma modifiers and field-list semantics as needed by common Windows rules.
-2. Broaden built-in Windows EVTX mapping beyond the current direct aliases.
-3. Add Chainsaw-compatible mapping file support.
-4. Improve hunt output controls and summary behavior.
-5. Expand fixture-backed `hunt` runtime coverage as Sigma support grows.
+1. Add more fixture-backed correlation runtime coverage.
+2. Continue hardening max-state behavior under low-buffer and out-of-order event streams.
+3. Expand syntax fixtures as unsupported Sigma grammar is intentionally added or rejected.
 
 ## Files To Read First Next Session
 
