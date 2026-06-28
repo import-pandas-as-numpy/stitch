@@ -7,6 +7,8 @@
 
 Fast offline Windows Event Log analysis from the command line.
 
+**Docs:** [stitch.sudorem.dev](https://stitch.sudorem.dev/)
+
 `stitch` searches EVTX collections, hunts with Sigma rules, runs supported
 Sigma correlation rules, and dumps records into machine-friendly formats. It is
 built for incident-response style workflows where speed, readable output, and
@@ -166,6 +168,11 @@ Sequential by design:
 - Correlation-enabled `hunt`.
 
 ## Documentation
+
+The documentation website is published at
+[stitch.sudorem.dev](https://stitch.sudorem.dev/). Source lives in [site](site).
+Build the static site with `npm run docs:build`; Vercel publishes the generated
+`site/dist` directory.
 
 | Topic | Link |
 | --- | --- |
