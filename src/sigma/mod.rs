@@ -1,4 +1,5 @@
 use std::borrow::Cow;
+use std::collections::{HashMap, VecDeque};
 use std::fmt::Write as _;
 use std::fs;
 use std::net::IpAddr;
@@ -8,13 +9,14 @@ use regex::Regex;
 use serde::Deserialize;
 use serde_json::Value as JsonValue;
 use thiserror::Error;
-use time::{OffsetDateTime, format_description::well_known::Rfc3339};
+use time::{Duration, OffsetDateTime, format_description::well_known::Rfc3339};
 
 use crate::event::{Event, FieldValue};
 
 #[derive(Debug, Clone)]
 pub struct SigmaRule {
     pub path: PathBuf,
+    pub name: Option<String>,
     pub title: String,
     pub id: Option<String>,
     pub status: Option<String>,
@@ -24,21 +26,127 @@ pub struct SigmaRule {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SkippedSigmaRule {
+pub struct SigmaCorrelationRule {
     pub path: PathBuf,
+    pub name: Option<String>,
     pub title: String,
-    pub reason: SkipReason,
+    pub id: Option<String>,
+    pub status: Option<String>,
+    pub level: Option<String>,
+    pub tags: Vec<String>,
+    pub correlation: CorrelationDefinition,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CorrelationDefinition {
+    pub kind: CorrelationKind,
+    pub referenced_rules: Vec<String>,
+    pub group_by: Vec<String>,
+    pub timespan: Duration,
+    pub condition: Option<CountCondition>,
+    pub value_fields: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SkipReason {
-    Correlation,
+pub enum CorrelationKind {
+    EventCount,
+    ValueCount,
+    Temporal,
+    TemporalOrdered,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CountCondition {
+    operator: CountOperator,
+    threshold: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CountOperator {
+    GreaterThan,
+    GreaterThanOrEqual,
+    Equal,
+    NotEqual,
+    LessThanOrEqual,
+    LessThan,
 }
 
 #[derive(Debug, Default, Clone)]
 pub struct SigmaLoadReport {
     pub rules: Vec<SigmaRule>,
-    pub skipped: Vec<SkippedSigmaRule>,
+    pub correlations: Vec<SigmaCorrelationRule>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CorrelationRuntimeScope {
+    File,
+    Host,
+    Global,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SigmaCorrelationMatch {
+    pub rule: SigmaCorrelationRule,
+    pub group: Vec<(String, String)>,
+    pub window_start: String,
+    pub window_end: String,
+    pub matches: Vec<CorrelationSourceMatch>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CorrelationSourceMatch {
+    pub rule_title: String,
+    pub rule_id: Option<String>,
+    pub rule_name: Option<String>,
+    pub timestamp: String,
+    pub record_id: Option<u64>,
+    pub channel: Option<String>,
+    pub event_id: Option<u64>,
+    pub computer: Option<String>,
+    pub file_path: PathBuf,
+    pub fields: Vec<(String, Option<String>)>,
+}
+
+#[derive(Debug)]
+pub struct SigmaCorrelationEngine {
+    rules: Vec<CorrelationRuntimeRule>,
+    scope: CorrelationRuntimeScope,
+    max_state: usize,
+    state: HashMap<CorrelationStateKey, CorrelationWindow>,
+    evicted_state_entries: usize,
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct SigmaCorrelationStats {
+    pub state_entries: usize,
+    pub evicted_state_entries: usize,
+}
+
+#[derive(Debug, Clone)]
+struct CorrelationRuntimeRule {
+    index: usize,
+    rule: SigmaCorrelationRule,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct CorrelationStateKey {
+    rule_index: usize,
+    scope: String,
+    group: Vec<(String, String)>,
+}
+
+#[derive(Debug, Default)]
+struct CorrelationWindow {
+    matches: VecDeque<CorrelationWindowMatch>,
+    alerted: bool,
+}
+
+#[derive(Debug, Clone)]
+struct CorrelationWindowMatch {
+    timestamp: OffsetDateTime,
+    source: CorrelationSourceMatch,
+    values: Vec<String>,
+    reference_index: usize,
 }
 
 #[derive(Debug, Error)]
@@ -69,6 +177,7 @@ pub enum SigmaLoadError {
 
 #[derive(Debug, Deserialize)]
 struct RawSigmaRule {
+    name: Option<String>,
     title: Option<String>,
     id: Option<String>,
     status: Option<String>,
@@ -189,11 +298,26 @@ impl SigmaRule {
         self.detection.matches(event)
     }
 
+    #[must_use]
+    pub fn is_referenced_by(&self, references: &[String]) -> bool {
+        references
+            .iter()
+            .any(|reference| self.matches_reference(reference))
+    }
+
+    fn matches_reference(&self, reference: &str) -> bool {
+        self.name.as_deref() == Some(reference)
+            || self.id.as_deref() == Some(reference)
+            || self.title == reference
+    }
+
     #[cfg(test)]
     pub fn test_rule(title: impl Into<String>, level: Option<String>) -> Self {
+        let title = title.into();
         Self {
             path: PathBuf::from("rule.yml"),
-            title: title.into(),
+            name: Some(title.to_ascii_lowercase().replace(' ', "_")),
+            title,
             id: Some("11111111-1111-1111-1111-111111111111".to_owned()),
             status: Some("test".to_owned()),
             level,
@@ -202,6 +326,136 @@ impl SigmaRule {
                 condition: ConditionExpr::Selection("selection".to_owned()),
                 selections: Vec::new(),
             },
+        }
+    }
+}
+
+impl CountCondition {
+    #[cfg(test)]
+    pub fn test_gte(threshold: usize) -> Self {
+        Self {
+            operator: CountOperator::GreaterThanOrEqual,
+            threshold,
+        }
+    }
+
+    fn matches(self, count: usize) -> bool {
+        match self.operator {
+            CountOperator::GreaterThan => count > self.threshold,
+            CountOperator::GreaterThanOrEqual => count >= self.threshold,
+            CountOperator::Equal => count == self.threshold,
+            CountOperator::NotEqual => count != self.threshold,
+            CountOperator::LessThanOrEqual => count <= self.threshold,
+            CountOperator::LessThan => count < self.threshold,
+        }
+    }
+}
+
+impl SigmaCorrelationEngine {
+    #[must_use]
+    pub fn new(
+        rules: &[SigmaCorrelationRule],
+        scope: CorrelationRuntimeScope,
+        max_state: usize,
+    ) -> Self {
+        Self {
+            rules: rules
+                .iter()
+                .cloned()
+                .enumerate()
+                .map(|(index, rule)| CorrelationRuntimeRule { index, rule })
+                .collect(),
+            scope,
+            max_state,
+            state: HashMap::new(),
+            evicted_state_entries: 0,
+        }
+    }
+
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.rules.is_empty()
+    }
+
+    #[must_use]
+    pub fn stats(&self) -> SigmaCorrelationStats {
+        SigmaCorrelationStats {
+            state_entries: self.state.len(),
+            evicted_state_entries: self.evicted_state_entries,
+        }
+    }
+
+    pub fn observe_match(
+        &mut self,
+        rule: &SigmaRule,
+        event: &Event,
+        event_fields: &[String],
+    ) -> Vec<SigmaCorrelationMatch> {
+        let mut matches = Vec::new();
+        let timestamp = event
+            .metadata
+            .timestamp
+            .as_deref()
+            .and_then(parse_event_timestamp);
+        let Some(timestamp) = timestamp else {
+            return matches;
+        };
+
+        for runtime_rule in self.rules.clone() {
+            let Some(reference_index) = correlation_reference_index(&runtime_rule.rule, rule)
+            else {
+                continue;
+            };
+
+            let Some(group) = correlation_group(&runtime_rule.rule, event, self.scope) else {
+                continue;
+            };
+            let key = CorrelationStateKey {
+                rule_index: runtime_rule.index,
+                scope: correlation_scope_value(event, self.scope),
+                group: group.clone(),
+            };
+            let Some(values) = correlation_value_fields(&runtime_rule.rule, event) else {
+                continue;
+            };
+            let source = correlation_source_match(rule, event, event_fields);
+            let window = self.state.entry(key).or_default();
+            window.matches.push_back(CorrelationWindowMatch {
+                timestamp,
+                source,
+                values,
+                reference_index,
+            });
+            evict_old_correlation_matches(
+                &mut window.matches,
+                timestamp,
+                runtime_rule.rule.correlation.timespan,
+            );
+
+            let condition_matches = correlation_window_matches(&runtime_rule.rule, window);
+            if condition_matches && !window.alerted {
+                window.alerted = true;
+                matches.push(build_correlation_match(&runtime_rule.rule, group, window));
+            } else if !condition_matches {
+                window.alerted = false;
+            }
+        }
+
+        self.enforce_state_limit();
+        matches
+    }
+
+    fn enforce_state_limit(&mut self) {
+        if self.max_state == 0 || self.state.len() <= self.max_state {
+            return;
+        }
+
+        while self.state.len() > self.max_state {
+            let Some(key) = oldest_correlation_state_key(&self.state) else {
+                return;
+            };
+            self.state.remove(&key);
+            self.evicted_state_entries += 1;
         }
     }
 }
@@ -437,9 +691,8 @@ pub fn load_sigma_rules(paths: &[PathBuf]) -> Result<SigmaLoadReport, SigmaLoadE
         .rules
         .sort_by(|left, right| left.path.cmp(&right.path));
     report
-        .skipped
+        .correlations
         .sort_by(|left, right| left.path.cmp(&right.path));
-
     Ok(report)
 }
 
@@ -477,8 +730,26 @@ fn load_file(path: &Path, report: &mut SigmaLoadReport) -> Result<(), SigmaLoadE
         path: path.to_path_buf(),
         source,
     })?;
+    let documents = split_yaml_documents(&content);
+
+    if documents.is_empty() {
+        return Err(unsupported_rule(path, "rule file is empty"));
+    }
+
+    for document in documents {
+        load_document(path, document, report)?;
+    }
+
+    Ok(())
+}
+
+fn load_document(
+    path: &Path,
+    document: &str,
+    report: &mut SigmaLoadReport,
+) -> Result<(), SigmaLoadError> {
     let raw: RawSigmaRule =
-        noyalib::from_str(&content).map_err(|source| SigmaLoadError::RuleParse {
+        noyalib::from_str(document).map_err(|source| SigmaLoadError::RuleParse {
             path: path.to_path_buf(),
             source,
         })?;
@@ -490,16 +761,22 @@ fn load_file(path: &Path, report: &mut SigmaLoadReport) -> Result<(), SigmaLoadE
     });
 
     if is_correlation_rule(&raw) {
-        report.skipped.push(SkippedSigmaRule {
+        report.correlations.push(SigmaCorrelationRule {
             path: path.to_path_buf(),
+            name: raw.name,
             title,
-            reason: SkipReason::Correlation,
+            id: raw.id,
+            status: raw.status,
+            level: raw.level,
+            tags: raw.tags.0,
+            correlation: parse_correlation_definition(path, raw.correlation)?,
         });
         return Ok(());
     }
 
     report.rules.push(SigmaRule {
         path: path.to_path_buf(),
+        name: raw.name,
         title,
         id: raw.id,
         status: raw.status,
@@ -509,6 +786,573 @@ fn load_file(path: &Path, report: &mut SigmaLoadReport) -> Result<(), SigmaLoadE
     });
 
     Ok(())
+}
+
+fn parse_correlation_definition(
+    path: &Path,
+    correlation: Option<noyalib::Value>,
+) -> Result<CorrelationDefinition, SigmaLoadError> {
+    let Some(correlation) = correlation else {
+        return Err(unsupported_rule(
+            path,
+            "correlation rule is missing a correlation mapping",
+        ));
+    };
+
+    let noyalib::Value::Mapping(entries) = &correlation else {
+        return Err(unsupported_rule(
+            path,
+            "correlation section must be a mapping",
+        ));
+    };
+
+    let mut kind = None;
+    let mut referenced_rules = Vec::new();
+    let mut group_by = Vec::new();
+    let mut timespan = None;
+    let mut condition = None;
+
+    for (key, value) in entries {
+        match key.as_str() {
+            "type" => {
+                kind = Some(parse_correlation_kind(path, value)?);
+            }
+            "rules" => {
+                referenced_rules = parse_correlation_string_list(path, "rules", value)?;
+            }
+            "group-by" | "group_by" => {
+                group_by = parse_correlation_string_list(path, "group-by", value)?;
+            }
+            "timespan" | "timeframe" => {
+                timespan = Some(parse_correlation_timespan(path, value)?);
+            }
+            "condition" => {
+                condition = Some(parse_count_condition(path, value)?);
+            }
+            _ => {}
+        }
+    }
+
+    let kind = kind.ok_or_else(|| unsupported_rule(path, "correlation rules require a type"))?;
+    let timespan =
+        timespan.ok_or_else(|| unsupported_rule(path, "correlation rules require a timespan"))?;
+    if referenced_rules.is_empty() {
+        return Err(unsupported_rule(
+            path,
+            "correlation rules require a non-empty rules list",
+        ));
+    }
+    if matches!(kind, CorrelationKind::ValueCount)
+        && condition
+            .as_ref()
+            .is_none_or(|condition| condition.value_fields.is_empty())
+    {
+        return Err(unsupported_rule(
+            path,
+            "value_count correlation rules require a condition field",
+        ));
+    }
+    if matches!(
+        kind,
+        CorrelationKind::EventCount | CorrelationKind::ValueCount
+    ) && condition.is_none()
+    {
+        return Err(unsupported_rule(
+            path,
+            "count correlation rules require condition",
+        ));
+    }
+
+    Ok(CorrelationDefinition {
+        kind,
+        referenced_rules,
+        group_by,
+        timespan,
+        condition: condition.as_ref().map(|condition| condition.count),
+        value_fields: condition.map_or_else(Vec::new, |condition| condition.value_fields),
+    })
+}
+
+#[derive(Debug)]
+struct ParsedCorrelationCondition {
+    count: CountCondition,
+    value_fields: Vec<String>,
+}
+
+fn parse_correlation_kind(
+    path: &Path,
+    value: &noyalib::Value,
+) -> Result<CorrelationKind, SigmaLoadError> {
+    let kind = parse_correlation_string(path, "type", value)?;
+
+    match kind.as_str() {
+        "event_count" => Ok(CorrelationKind::EventCount),
+        "value_count" => Ok(CorrelationKind::ValueCount),
+        "temporal" => Ok(CorrelationKind::Temporal),
+        "temporal_ordered" => Ok(CorrelationKind::TemporalOrdered),
+        _ => Err(unsupported_rule(
+            path,
+            format!("unsupported correlation type {kind:?}"),
+        )),
+    }
+}
+
+fn parse_correlation_timespan(
+    path: &Path,
+    value: &noyalib::Value,
+) -> Result<Duration, SigmaLoadError> {
+    let timespan = parse_correlation_string(path, "timespan", value)?;
+    parse_duration(&timespan).ok_or_else(|| {
+        unsupported_rule(
+            path,
+            format!(
+                "invalid correlation timespan {timespan:?}; expected values like 30s, 5m, 2h, or 1d"
+            ),
+        )
+    })
+}
+
+fn parse_count_condition(
+    path: &Path,
+    value: &noyalib::Value,
+) -> Result<ParsedCorrelationCondition, SigmaLoadError> {
+    match value {
+        noyalib::Value::Mapping(entries) => parse_count_condition_mapping(path, entries),
+        noyalib::Value::String(_) => parse_count_condition_string(path, value),
+        other => Err(unsupported_rule(
+            path,
+            format!("correlation condition must be a mapping, found {other:?}"),
+        )),
+    }
+}
+
+fn parse_count_condition_mapping(
+    path: &Path,
+    entries: &noyalib::Mapping,
+) -> Result<ParsedCorrelationCondition, SigmaLoadError> {
+    let mut condition = None;
+    let mut value_fields = Vec::new();
+
+    for (key, value) in entries {
+        match key.as_str() {
+            "field" => value_fields = parse_correlation_string_list(path, "field", value)?,
+            "gt" | "gte" | "eq" | "neq" | "lte" | "lt" | ">" | ">=" | "==" | "!=" | "<=" | "<" => {
+                if condition.is_some() {
+                    return Err(unsupported_rule(
+                        path,
+                        "correlation condition must contain exactly one count operator",
+                    ));
+                }
+                condition = Some(CountCondition {
+                    operator: parse_count_operator(path, key)?,
+                    threshold: parse_correlation_usize(path, key, value)?,
+                });
+            }
+            _ => {
+                return Err(unsupported_rule(
+                    path,
+                    format!("unsupported correlation condition key {key:?}"),
+                ));
+            }
+        }
+    }
+
+    Ok(ParsedCorrelationCondition {
+        count: condition.ok_or_else(|| {
+            unsupported_rule(path, "correlation condition is missing a count operator")
+        })?,
+        value_fields,
+    })
+}
+
+fn parse_count_condition_string(
+    path: &Path,
+    value: &noyalib::Value,
+) -> Result<ParsedCorrelationCondition, SigmaLoadError> {
+    let condition = parse_correlation_string(path, "condition", value)?;
+    let mut parts = condition.split_whitespace();
+    let operator = parts
+        .next()
+        .ok_or_else(|| unsupported_rule(path, "correlation condition is empty"))?;
+    let threshold = parts
+        .next()
+        .ok_or_else(|| unsupported_rule(path, "correlation condition is missing a threshold"))?;
+
+    if parts.next().is_some() {
+        return Err(unsupported_rule(
+            path,
+            format!("unsupported correlation condition {condition:?}"),
+        ));
+    }
+
+    let operator = parse_count_operator(path, operator)?;
+    let threshold = threshold.parse::<usize>().map_err(|_| {
+        unsupported_rule(
+            path,
+            format!(
+                "correlation condition threshold must be an unsigned integer, found {threshold:?}"
+            ),
+        )
+    })?;
+
+    Ok(ParsedCorrelationCondition {
+        count: CountCondition {
+            operator,
+            threshold,
+        },
+        value_fields: Vec::new(),
+    })
+}
+
+fn parse_count_operator(path: &Path, operator: &str) -> Result<CountOperator, SigmaLoadError> {
+    match operator {
+        "gt" | ">" => Ok(CountOperator::GreaterThan),
+        "gte" | ">=" => Ok(CountOperator::GreaterThanOrEqual),
+        "eq" | "==" => Ok(CountOperator::Equal),
+        "neq" | "!=" => Ok(CountOperator::NotEqual),
+        "lte" | "<=" => Ok(CountOperator::LessThanOrEqual),
+        "lt" | "<" => Ok(CountOperator::LessThan),
+        _ => Err(unsupported_rule(
+            path,
+            format!("unsupported correlation condition operator {operator:?}"),
+        )),
+    }
+}
+
+fn parse_correlation_usize(
+    path: &Path,
+    field: &str,
+    value: &noyalib::Value,
+) -> Result<usize, SigmaLoadError> {
+    match value {
+        noyalib::Value::Number(value) => {
+            let number = noyalib::Value::Number(*value);
+            let json_value = noyalib::from_value::<JsonValue>(&number).map_err(|source| {
+                SigmaLoadError::RuleParse {
+                    path: path.to_path_buf(),
+                    source,
+                }
+            })?;
+            json_value
+                .as_u64()
+                .and_then(|value| value.try_into().ok())
+                .ok_or_else(|| {
+                    unsupported_rule(
+                        path,
+                        format!("correlation condition {field:?} must be an unsigned integer"),
+                    )
+                })
+        }
+        noyalib::Value::String(value) => value.parse::<usize>().map_err(|_| {
+            unsupported_rule(
+                path,
+                format!("correlation condition {field:?} must be an unsigned integer"),
+            )
+        }),
+        other => Err(unsupported_rule(
+            path,
+            format!("correlation condition {field:?} must be numeric, found {other:?}"),
+        )),
+    }
+}
+
+fn parse_correlation_string(
+    path: &Path,
+    field: &str,
+    value: &noyalib::Value,
+) -> Result<String, SigmaLoadError> {
+    match value {
+        noyalib::Value::String(value) => Ok(value.clone()),
+        other => Err(unsupported_rule(
+            path,
+            format!("correlation field {field:?} must be a string, found {other:?}"),
+        )),
+    }
+}
+
+fn parse_correlation_string_list(
+    path: &Path,
+    field: &str,
+    value: &noyalib::Value,
+) -> Result<Vec<String>, SigmaLoadError> {
+    match value {
+        noyalib::Value::String(value) => Ok(vec![value.clone()]),
+        noyalib::Value::Sequence(values) => values
+            .iter()
+            .map(|value| match value {
+                noyalib::Value::String(value) => Ok(value.clone()),
+                other => Err(unsupported_rule(
+                    path,
+                    format!("correlation field {field:?} must contain strings, found {other:?}"),
+                )),
+            })
+            .collect(),
+        other => Err(unsupported_rule(
+            path,
+            format!(
+                "correlation field {field:?} must be a string or list of strings, found {other:?}"
+            ),
+        )),
+    }
+}
+
+fn split_yaml_documents(content: &str) -> Vec<&str> {
+    let mut documents = Vec::new();
+    let mut start = 0usize;
+    let mut offset = 0usize;
+
+    for line in content.split_inclusive('\n') {
+        if matches!(line.trim(), "---" | "...") {
+            let document = content[start..offset].trim();
+            if !document.is_empty() {
+                documents.push(document);
+            }
+            start = offset + line.len();
+        }
+
+        offset += line.len();
+    }
+
+    let document = content[start..].trim();
+    if !document.is_empty() {
+        documents.push(document);
+    }
+
+    documents
+}
+
+fn parse_duration(value: &str) -> Option<Duration> {
+    let unit = value.chars().last()?;
+    let number = value[..value.len().saturating_sub(unit.len_utf8())]
+        .parse::<i64>()
+        .ok()?;
+
+    if number < 0 {
+        return None;
+    }
+
+    Some(match unit {
+        's' => Duration::seconds(number),
+        'm' => Duration::minutes(number),
+        'h' => Duration::hours(number),
+        'd' => Duration::days(number),
+        _ => return None,
+    })
+}
+
+fn correlation_reference_index(
+    correlation: &SigmaCorrelationRule,
+    rule: &SigmaRule,
+) -> Option<usize> {
+    correlation
+        .correlation
+        .referenced_rules
+        .iter()
+        .position(|reference| rule.matches_reference(reference))
+}
+
+fn correlation_group(
+    correlation: &SigmaCorrelationRule,
+    event: &Event,
+    scope: CorrelationRuntimeScope,
+) -> Option<Vec<(String, String)>> {
+    let mut group = Vec::new();
+
+    match scope {
+        CorrelationRuntimeScope::File => group.push((
+            "scope.file".to_owned(),
+            event.source.file_path.display().to_string(),
+        )),
+        CorrelationRuntimeScope::Host => group.push((
+            "scope.host".to_owned(),
+            event.metadata.computer.clone().unwrap_or_default(),
+        )),
+        CorrelationRuntimeScope::Global => {}
+    }
+
+    for field in &correlation.correlation.group_by {
+        let resolved = sigma_field_alias(field);
+        let value = event.field(&resolved)?.as_text()?;
+        group.push((field.clone(), value));
+    }
+
+    Some(group)
+}
+
+fn correlation_value_fields(
+    correlation: &SigmaCorrelationRule,
+    event: &Event,
+) -> Option<Vec<String>> {
+    if !matches!(correlation.correlation.kind, CorrelationKind::ValueCount) {
+        return Some(Vec::new());
+    }
+
+    correlation
+        .correlation
+        .value_fields
+        .iter()
+        .map(|field| {
+            let resolved = sigma_field_alias(field);
+            event.field(&resolved)?.as_text()
+        })
+        .collect()
+}
+
+fn correlation_window_matches(rule: &SigmaCorrelationRule, window: &CorrelationWindow) -> bool {
+    match rule.correlation.kind {
+        CorrelationKind::EventCount => rule
+            .correlation
+            .condition
+            .is_some_and(|condition| condition.matches(window.matches.len())),
+        CorrelationKind::ValueCount => {
+            let mut values = window
+                .matches
+                .iter()
+                .map(|entry| entry.values.clone())
+                .collect::<Vec<_>>();
+            values.sort();
+            values.dedup();
+            rule.correlation
+                .condition
+                .is_some_and(|condition| condition.matches(values.len()))
+        }
+        CorrelationKind::Temporal => temporal_window_matches(rule, window),
+        CorrelationKind::TemporalOrdered => temporal_ordered_window_matches(rule, window),
+    }
+}
+
+fn temporal_window_matches(rule: &SigmaCorrelationRule, window: &CorrelationWindow) -> bool {
+    let mut seen = vec![false; rule.correlation.referenced_rules.len()];
+
+    for entry in &window.matches {
+        if let Some(value) = seen.get_mut(entry.reference_index) {
+            *value = true;
+        }
+    }
+
+    !seen.is_empty() && seen.into_iter().all(|seen| seen)
+}
+
+fn temporal_ordered_window_matches(
+    rule: &SigmaCorrelationRule,
+    window: &CorrelationWindow,
+) -> bool {
+    let mut next = 0usize;
+
+    for entry in &window.matches {
+        if entry.reference_index == next {
+            next += 1;
+
+            if next == rule.correlation.referenced_rules.len() {
+                return true;
+            }
+        }
+    }
+
+    false
+}
+
+fn oldest_correlation_state_key(
+    state: &HashMap<CorrelationStateKey, CorrelationWindow>,
+) -> Option<CorrelationStateKey> {
+    state
+        .iter()
+        .min_by(|(left_key, left_window), (right_key, right_window)| {
+            let left_timestamp = left_window.matches.back().map(|entry| entry.timestamp);
+            let right_timestamp = right_window.matches.back().map(|entry| entry.timestamp);
+
+            left_timestamp
+                .cmp(&right_timestamp)
+                .then_with(|| left_key.rule_index.cmp(&right_key.rule_index))
+                .then_with(|| left_key.scope.cmp(&right_key.scope))
+                .then_with(|| left_key.group.cmp(&right_key.group))
+        })
+        .map(|(key, _)| key.clone())
+}
+
+fn correlation_scope_value(event: &Event, scope: CorrelationRuntimeScope) -> String {
+    match scope {
+        CorrelationRuntimeScope::File => event.source.file_path.display().to_string(),
+        CorrelationRuntimeScope::Host => event.metadata.computer.clone().unwrap_or_default(),
+        CorrelationRuntimeScope::Global => String::new(),
+    }
+}
+
+fn correlation_source_match(
+    rule: &SigmaRule,
+    event: &Event,
+    event_fields: &[String],
+) -> CorrelationSourceMatch {
+    CorrelationSourceMatch {
+        rule_title: rule.title.clone(),
+        rule_id: rule.id.clone(),
+        rule_name: rule.name.clone(),
+        timestamp: event.metadata.timestamp.clone().unwrap_or_default(),
+        record_id: event.metadata.record_id,
+        channel: event.metadata.channel.clone(),
+        event_id: event.metadata.event_id,
+        computer: event.metadata.computer.clone(),
+        file_path: event.source.file_path.clone(),
+        fields: event_fields
+            .iter()
+            .map(|field| {
+                let resolved = sigma_field_alias(field);
+                (
+                    field.clone(),
+                    event.field(&resolved).and_then(FieldValue::as_text),
+                )
+            })
+            .collect(),
+    }
+}
+
+fn evict_old_correlation_matches(
+    matches: &mut VecDeque<CorrelationWindowMatch>,
+    current: OffsetDateTime,
+    timespan: Duration,
+) {
+    while matches
+        .front()
+        .is_some_and(|entry| current - entry.timestamp > timespan)
+    {
+        matches.pop_front();
+    }
+}
+
+fn build_correlation_match(
+    rule: &SigmaCorrelationRule,
+    group: Vec<(String, String)>,
+    window: &CorrelationWindow,
+) -> SigmaCorrelationMatch {
+    let window_start = window
+        .matches
+        .front()
+        .map(|entry| entry.source.timestamp.clone())
+        .unwrap_or_default();
+    let window_end = window
+        .matches
+        .back()
+        .map(|entry| entry.source.timestamp.clone())
+        .unwrap_or_default();
+
+    SigmaCorrelationMatch {
+        rule: rule.clone(),
+        group,
+        window_start,
+        window_end,
+        matches: window
+            .matches
+            .iter()
+            .map(|entry| entry.source.clone())
+            .collect(),
+    }
+}
+
+fn parse_event_timestamp(value: &str) -> Option<OffsetDateTime> {
+    OffsetDateTime::parse(value, &Rfc3339).ok().or_else(|| {
+        let normalized = format!("{value}Z");
+        OffsetDateTime::parse(&normalized, &Rfc3339).ok()
+    })
 }
 
 fn parse_detection(
@@ -1953,12 +2797,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn loads_regular_rules_and_skips_correlation_rules() {
+    fn loads_regular_rules_and_correlation_documents() {
         let fixture = tempfile::tempdir().expect("tempdir should be created");
         fs::write(
             fixture.path().join("process_creation.yml"),
             r"
 title: Suspicious Process
+name: suspicious_process
 id: 11111111-1111-1111-1111-111111111111
 status: test
 level: high
@@ -1976,12 +2821,15 @@ detection:
         fs::write(
             fixture.path().join("correlation.yml"),
             r"
+---
 title: Many Failed Logons
 type: correlation
 correlation:
   type: event_count
   rules:
-    - failed_logon
+    - suspicious_process
+  condition:
+    gte: 2
   timespan: 5m
 ",
         )
@@ -1996,8 +2844,481 @@ correlation:
         assert_eq!(report.rules[0].title, "Suspicious Process");
         assert_eq!(report.rules[0].level.as_deref(), Some("high"));
         assert_eq!(report.rules[0].tags, ["attack.execution"]);
-        assert_eq!(report.skipped.len(), 1);
-        assert_eq!(report.skipped[0].reason, SkipReason::Correlation);
+        assert_eq!(report.correlations.len(), 1);
+        assert_eq!(report.correlations[0].title, "Many Failed Logons");
+        assert_eq!(
+            report.correlations[0].correlation.kind,
+            CorrelationKind::EventCount
+        );
+        assert_eq!(
+            report.correlations[0].correlation.referenced_rules,
+            ["suspicious_process"]
+        );
+        assert_eq!(
+            report.correlations[0].correlation.timespan,
+            Duration::minutes(5)
+        );
+        assert_eq!(
+            report.correlations[0].correlation.condition,
+            Some(CountCondition {
+                operator: CountOperator::GreaterThanOrEqual,
+                threshold: 2
+            })
+        );
+        assert!(report.correlations[0].correlation.value_fields.is_empty());
+    }
+
+    #[test]
+    fn loads_sigma_syntax_valid_fixtures() {
+        let path = PathBuf::from("tests/fixtures/sigma-syntax/valid");
+        let report = load_sigma_rules(&[path]).expect("valid Sigma syntax fixtures should load");
+
+        assert_eq!(
+            report.rules.len(),
+            5,
+            "valid syntax fixtures should include base Sigma rules"
+        );
+        assert_eq!(
+            report.correlations.len(),
+            4,
+            "valid syntax fixtures should include correlation rules"
+        );
+        assert!(
+            report
+                .rules
+                .iter()
+                .any(|rule| rule.name.as_deref() == Some("syntax_base_modifiers")),
+            "valid fixtures should load modifier-heavy base rule"
+        );
+        assert!(
+            report
+                .rules
+                .iter()
+                .any(|rule| rule.name.as_deref() == Some("syntax_alternatives_keywords")),
+            "valid fixtures should load alternatives and keyword base rule"
+        );
+        assert!(
+            report
+                .correlations
+                .iter()
+                .any(|rule| rule.correlation.kind == CorrelationKind::EventCount),
+            "valid fixtures should include event_count correlation"
+        );
+        assert!(
+            report
+                .correlations
+                .iter()
+                .any(|rule| rule.correlation.kind == CorrelationKind::ValueCount),
+            "valid fixtures should include value_count correlation"
+        );
+        assert!(
+            report
+                .correlations
+                .iter()
+                .any(|rule| rule.correlation.kind == CorrelationKind::Temporal),
+            "valid fixtures should include temporal correlation"
+        );
+        assert!(
+            report
+                .correlations
+                .iter()
+                .any(|rule| rule.correlation.kind == CorrelationKind::TemporalOrdered),
+            "valid fixtures should include temporal_ordered correlation"
+        );
+    }
+
+    #[test]
+    fn rejects_sigma_syntax_invalid_fixtures_with_readable_errors() {
+        let cases = [
+            ("base_missing_condition.yml", "missing detection condition"),
+            ("base_unknown_selection.yml", "unknown selection"),
+            (
+                "base_unsupported_modifier_typo.yml",
+                "unsupported Sigma modifier",
+            ),
+            (
+                "base_bad_condition_pattern.yml",
+                "does not match any selections",
+            ),
+            ("correlation_missing_rules.yml", "non-empty rules list"),
+            (
+                "correlation_bad_type_typo.yml",
+                "unsupported correlation type",
+            ),
+            (
+                "correlation_value_count_missing_field.yml",
+                "condition field",
+            ),
+            (
+                "correlation_bad_timespan.yml",
+                "invalid correlation timespan",
+            ),
+            (
+                "correlation_bad_condition_operator.yml",
+                "unsupported correlation condition key",
+            ),
+        ];
+
+        for (fixture, expected) in cases {
+            let path = PathBuf::from("tests/fixtures/sigma-syntax/invalid").join(fixture);
+            let error = load_sigma_rules(std::slice::from_ref(&path))
+                .expect_err("invalid Sigma syntax fixture should fail");
+            let message = error.to_string();
+
+            assert!(
+                matches!(error, SigmaLoadError::UnsupportedRule { .. }),
+                "{fixture} should fail as an unsupported Sigma rule, got {error:?}"
+            );
+            assert!(
+                message.contains(expected),
+                "{fixture} should mention {expected:?}, got {message:?}"
+            );
+        }
+
+        let malformed_path =
+            PathBuf::from("tests/fixtures/sigma-syntax/invalid/base_malformed_yaml.yml");
+        let malformed_error = load_sigma_rules(&[malformed_path])
+            .expect_err("malformed Sigma YAML fixture should fail");
+
+        assert!(
+            matches!(malformed_error, SigmaLoadError::RuleParse { .. }),
+            "malformed YAML should fail during YAML parsing, got {malformed_error:?}"
+        );
+    }
+
+    #[test]
+    fn temporal_ordered_correlation_emits_when_references_match_in_order() {
+        let fixture = tempfile::tempdir().expect("tempdir should be created");
+        let path = fixture.path().join("ordered_sequence.yml");
+        fs::write(
+            &path,
+            r"
+---
+title: Process Start
+name: process_start
+detection:
+  selection:
+    EventID: 1
+  condition: selection
+---
+title: Process Network
+name: process_network
+detection:
+  selection:
+    EventID: 3
+  condition: selection
+---
+title: Process File Write
+name: process_file_write
+detection:
+  selection:
+    EventID: 11
+  condition: selection
+---
+title: Process Network Then File Sequence
+type: correlation
+correlation:
+  type: temporal_ordered
+  rules:
+    - process_start
+    - process_network
+    - process_file_write
+  group-by:
+    - ProcessGuid
+  timespan: 5m
+",
+        )
+        .expect("correlation fixture should be written");
+        let report = load_sigma_rules(&[path]).expect("rules should load");
+        let mut engine =
+            SigmaCorrelationEngine::new(&report.correlations, CorrelationRuntimeScope::Host, 100);
+        let start = test_event(json!({
+            "Event": {
+                "System": {
+                    "EventID": 1,
+                    "Computer": "WIN-01",
+                    "TimeCreated": { "SystemTime": "2026-06-28T12:00:00Z" }
+                },
+                "EventData": { "ProcessGuid": "{11111111-1111-1111-1111-111111111111}" }
+            }
+        }));
+        let network = test_event(json!({
+            "Event": {
+                "System": {
+                    "EventID": 3,
+                    "Computer": "WIN-01",
+                    "TimeCreated": { "SystemTime": "2026-06-28T12:01:00Z" }
+                },
+                "EventData": { "ProcessGuid": "{11111111-1111-1111-1111-111111111111}" }
+            }
+        }));
+        let file_write = test_event(json!({
+            "Event": {
+                "System": {
+                    "EventID": 11,
+                    "Computer": "WIN-01",
+                    "TimeCreated": { "SystemTime": "2026-06-28T12:02:00Z" }
+                },
+                "EventData": { "ProcessGuid": "{11111111-1111-1111-1111-111111111111}" }
+            }
+        }));
+
+        assert!(
+            engine
+                .observe_match(&report.rules[0], &start, &[])
+                .is_empty()
+        );
+        assert!(
+            engine
+                .observe_match(&report.rules[1], &network, &[])
+                .is_empty()
+        );
+
+        let matches = engine.observe_match(&report.rules[2], &file_write, &[]);
+
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0].rule.title, "Process Network Then File Sequence");
+        assert_eq!(matches[0].matches.len(), 3);
+        assert_eq!(matches[0].window_start, "2026-06-28T12:00:00Z");
+        assert_eq!(matches[0].window_end, "2026-06-28T12:02:00Z");
+    }
+
+    #[test]
+    fn temporal_ordered_correlation_rejects_out_of_order_references() {
+        let fixture = tempfile::tempdir().expect("tempdir should be created");
+        let path = fixture.path().join("ordered_sequence.yml");
+        fs::write(
+            &path,
+            r"
+---
+title: First Event
+name: first_event
+detection:
+  selection:
+    EventID: 1
+  condition: selection
+---
+title: Second Event
+name: second_event
+detection:
+  selection:
+    EventID: 3
+  condition: selection
+---
+title: Ordered Sequence
+type: correlation
+correlation:
+  type: temporal_ordered
+  rules:
+    - first_event
+    - second_event
+  group-by:
+    - ProcessGuid
+  timespan: 5m
+",
+        )
+        .expect("correlation fixture should be written");
+        let report = load_sigma_rules(&[path]).expect("rules should load");
+        let mut engine =
+            SigmaCorrelationEngine::new(&report.correlations, CorrelationRuntimeScope::Host, 100);
+        let second = test_event(json!({
+            "Event": {
+                "System": {
+                    "EventID": 3,
+                    "Computer": "WIN-01",
+                    "TimeCreated": { "SystemTime": "2026-06-28T12:00:00Z" }
+                },
+                "EventData": { "ProcessGuid": "{11111111-1111-1111-1111-111111111111}" }
+            }
+        }));
+        let first = test_event(json!({
+            "Event": {
+                "System": {
+                    "EventID": 1,
+                    "Computer": "WIN-01",
+                    "TimeCreated": { "SystemTime": "2026-06-28T12:01:00Z" }
+                },
+                "EventData": { "ProcessGuid": "{11111111-1111-1111-1111-111111111111}" }
+            }
+        }));
+
+        assert!(
+            engine
+                .observe_match(&report.rules[1], &second, &[])
+                .is_empty()
+        );
+        assert!(
+            engine
+                .observe_match(&report.rules[0], &first, &[])
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn temporal_correlation_matches_references_in_any_order() {
+        let fixture = tempfile::tempdir().expect("tempdir should be created");
+        let path = fixture.path().join("unordered_sequence.yml");
+        fs::write(
+            &path,
+            r"
+---
+title: First Event
+name: first_event
+detection:
+  selection:
+    EventID: 1
+  condition: selection
+---
+title: Second Event
+name: second_event
+detection:
+  selection:
+    EventID: 3
+  condition: selection
+---
+title: Unordered Sequence
+type: correlation
+correlation:
+  type: temporal
+  rules:
+    - first_event
+    - second_event
+  group-by:
+    - ProcessGuid
+  timespan: 5m
+",
+        )
+        .expect("correlation fixture should be written");
+        let report = load_sigma_rules(&[path]).expect("rules should load");
+        let mut engine =
+            SigmaCorrelationEngine::new(&report.correlations, CorrelationRuntimeScope::Host, 100);
+        let second = test_event(json!({
+            "Event": {
+                "System": {
+                    "EventID": 3,
+                    "Computer": "WIN-01",
+                    "TimeCreated": { "SystemTime": "2026-06-28T12:00:00Z" }
+                },
+                "EventData": { "ProcessGuid": "{11111111-1111-1111-1111-111111111111}" }
+            }
+        }));
+        let first = test_event(json!({
+            "Event": {
+                "System": {
+                    "EventID": 1,
+                    "Computer": "WIN-01",
+                    "TimeCreated": { "SystemTime": "2026-06-28T12:01:00Z" }
+                },
+                "EventData": { "ProcessGuid": "{11111111-1111-1111-1111-111111111111}" }
+            }
+        }));
+
+        assert!(
+            engine
+                .observe_match(&report.rules[1], &second, &[])
+                .is_empty()
+        );
+
+        let matches = engine.observe_match(&report.rules[0], &first, &[]);
+
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0].rule.title, "Unordered Sequence");
+    }
+
+    #[test]
+    fn correlation_max_state_evicts_oldest_state_group() {
+        let fixture = tempfile::tempdir().expect("tempdir should be created");
+        let path = fixture.path().join("state_limit.yml");
+        fs::write(
+            &path,
+            r"
+---
+title: Process Start
+name: process_start
+detection:
+  selection:
+    EventID: 1
+  condition: selection
+---
+title: Repeated Process Starts
+type: correlation
+correlation:
+  type: event_count
+  rules:
+    - process_start
+  group-by:
+    - ProcessGuid
+  condition:
+    gte: 2
+  timespan: 5m
+",
+        )
+        .expect("correlation fixture should be written");
+        let report = load_sigma_rules(&[path]).expect("rules should load");
+        let mut engine =
+            SigmaCorrelationEngine::new(&report.correlations, CorrelationRuntimeScope::Host, 1);
+        let first_group = test_event(json!({
+            "Event": {
+                "System": {
+                    "EventID": 1,
+                    "Computer": "WIN-01",
+                    "TimeCreated": { "SystemTime": "2026-06-28T12:00:00Z" }
+                },
+                "EventData": { "ProcessGuid": "{11111111-1111-1111-1111-111111111111}" }
+            }
+        }));
+        let second_group = test_event(json!({
+            "Event": {
+                "System": {
+                    "EventID": 1,
+                    "Computer": "WIN-01",
+                    "TimeCreated": { "SystemTime": "2026-06-28T12:01:00Z" }
+                },
+                "EventData": { "ProcessGuid": "{22222222-2222-2222-2222-222222222222}" }
+            }
+        }));
+        let first_group_again = test_event(json!({
+            "Event": {
+                "System": {
+                    "EventID": 1,
+                    "Computer": "WIN-01",
+                    "TimeCreated": { "SystemTime": "2026-06-28T12:02:00Z" }
+                },
+                "EventData": { "ProcessGuid": "{11111111-1111-1111-1111-111111111111}" }
+            }
+        }));
+
+        assert!(
+            engine
+                .observe_match(&report.rules[0], &first_group, &[])
+                .is_empty()
+        );
+        assert!(
+            engine
+                .observe_match(&report.rules[0], &second_group, &[])
+                .is_empty()
+        );
+        assert_eq!(
+            engine.stats(),
+            SigmaCorrelationStats {
+                state_entries: 1,
+                evicted_state_entries: 1
+            }
+        );
+
+        let matches = engine.observe_match(&report.rules[0], &first_group_again, &[]);
+
+        assert!(
+            matches.is_empty(),
+            "oldest group should be evicted before it can reach threshold"
+        );
+        assert_eq!(
+            engine.stats(),
+            SigmaCorrelationStats {
+                state_entries: 1,
+                evicted_state_entries: 2
+            }
+        );
     }
 
     #[test]
@@ -2747,6 +4068,180 @@ detection:
         assert!(
             matches!(error, SigmaLoadError::UnsupportedRule { message, .. } if message.contains("does not match any selections")),
             "missing selection patterns should be reported clearly"
+        );
+    }
+
+    #[test]
+    fn event_count_correlation_emits_when_grouped_window_reaches_threshold() {
+        let fixture = tempfile::tempdir().expect("tempdir should be created");
+        let path = fixture.path().join("failed_logon_correlation.yml");
+        fs::write(
+            &path,
+            r"
+---
+title: Failed Logon
+name: failed_logon
+detection:
+  selection:
+    EventID: 4625
+  condition: selection
+---
+title: Repeated Failed Logons
+type: correlation
+correlation:
+  type: event_count
+  rules:
+    - failed_logon
+  group-by:
+    - TargetUserName
+  condition:
+    gte: 2
+  timespan: 5m
+",
+        )
+        .expect("correlation fixture should be written");
+        let report = load_sigma_rules(&[path]).expect("rules should load");
+        let mut engine =
+            SigmaCorrelationEngine::new(&report.correlations, CorrelationRuntimeScope::Host, 100);
+        let first = test_event(json!({
+            "Event": {
+                "System": {
+                    "EventID": 4625,
+                    "Computer": "WIN-01",
+                    "TimeCreated": { "SystemTime": "2026-06-28T12:00:00Z" }
+                },
+                "EventData": { "TargetUserName": "alice" }
+            }
+        }));
+        let second = test_event(json!({
+            "Event": {
+                "System": {
+                    "EventID": 4625,
+                    "Computer": "WIN-01",
+                    "TimeCreated": { "SystemTime": "2026-06-28T12:04:00Z" }
+                },
+                "EventData": { "TargetUserName": "alice" }
+            }
+        }));
+
+        assert!(report.rules[0].matches(&first));
+        assert!(
+            engine
+                .observe_match(&report.rules[0], &first, &[])
+                .is_empty()
+        );
+
+        let matches = engine.observe_match(&report.rules[0], &second, &[]);
+
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0].rule.title, "Repeated Failed Logons");
+        assert_eq!(
+            matches[0].group,
+            [
+                ("scope.host".to_owned(), "WIN-01".to_owned()),
+                ("TargetUserName".to_owned(), "alice".to_owned())
+            ]
+        );
+        assert_eq!(matches[0].matches.len(), 2);
+        assert_eq!(matches[0].window_start, "2026-06-28T12:00:00Z");
+        assert_eq!(matches[0].window_end, "2026-06-28T12:04:00Z");
+    }
+
+    #[test]
+    fn value_count_correlation_counts_distinct_values_in_grouped_window() {
+        let fixture = tempfile::tempdir().expect("tempdir should be created");
+        let path = fixture.path().join("failed_logon_value_count.yml");
+        fs::write(
+            &path,
+            r"
+---
+title: Failed Logon
+name: failed_logon
+detection:
+  selection:
+    EventID: 4625
+  condition: selection
+---
+title: Failed Logons From Multiple Addresses
+type: correlation
+correlation:
+  type: value_count
+  rules:
+    - failed_logon
+  group-by:
+    - TargetUserName
+  condition:
+    field: IpAddress
+    gte: 2
+  timespan: 5m
+",
+        )
+        .expect("correlation fixture should be written");
+        let report = load_sigma_rules(&[path]).expect("rules should load");
+        let mut engine =
+            SigmaCorrelationEngine::new(&report.correlations, CorrelationRuntimeScope::Host, 100);
+        let first = test_event(json!({
+            "Event": {
+                "System": {
+                    "EventID": 4625,
+                    "Computer": "WIN-01",
+                    "TimeCreated": { "SystemTime": "2026-06-28T12:00:00Z" }
+                },
+                "EventData": {
+                    "TargetUserName": "alice",
+                    "IpAddress": "198.51.100.10"
+                }
+            }
+        }));
+        let duplicate_value = test_event(json!({
+            "Event": {
+                "System": {
+                    "EventID": 4625,
+                    "Computer": "WIN-01",
+                    "TimeCreated": { "SystemTime": "2026-06-28T12:01:00Z" }
+                },
+                "EventData": {
+                    "TargetUserName": "alice",
+                    "IpAddress": "198.51.100.10"
+                }
+            }
+        }));
+        let second_value = test_event(json!({
+            "Event": {
+                "System": {
+                    "EventID": 4625,
+                    "Computer": "WIN-01",
+                    "TimeCreated": { "SystemTime": "2026-06-28T12:02:00Z" }
+                },
+                "EventData": {
+                    "TargetUserName": "alice",
+                    "IpAddress": "198.51.100.11"
+                }
+            }
+        }));
+
+        assert!(
+            engine
+                .observe_match(&report.rules[0], &first, &[])
+                .is_empty()
+        );
+        assert!(
+            engine
+                .observe_match(&report.rules[0], &duplicate_value, &[])
+                .is_empty()
+        );
+
+        let matches = engine.observe_match(&report.rules[0], &second_value, &[]);
+
+        assert_eq!(matches.len(), 1);
+        assert_eq!(
+            matches[0].rule.title,
+            "Failed Logons From Multiple Addresses"
+        );
+        assert_eq!(matches[0].matches.len(), 3);
+        assert_eq!(
+            report.correlations[0].correlation.value_fields,
+            ["IpAddress"]
         );
     }
 

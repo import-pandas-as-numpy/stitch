@@ -1,0 +1,10 @@
+title: Invalid Correlation Type Typo
+name: invalid_correlation_type_typo
+type: correlation
+correlation:
+  type: valuecount
+  rules:
+    - some_rule
+  timespan: 5m
+  condition:
+    gte: 2

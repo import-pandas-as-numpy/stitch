@@ -2,7 +2,7 @@
 
 ## 2026-06-28
 
-Current milestone: Milestone 2, Hunt MVP Without Correlation.
+Current milestone: Milestone 3, Hunt With Correlation.
 
 Completed:
 
@@ -24,6 +24,17 @@ Completed:
 16. Implemented the remaining local-evaluable non-correlation Sigma modifiers: `exists`, `neq`, numeric comparisons, regex `i/m/s`, `windash`, Base64/UTF-16 encodings, `fieldref`, and time extractors.
 17. Kept `expand` as a clear unsupported rule-load diagnostic because Sigma placeholder expansion requires environment-specific placeholder configuration.
 18. Published a private GitHub backup at `https://github.com/import-pandas-as-numpy/stitch` and pushed the initial `main` branch.
+19. Began Sigma correlation support by parsing multi-document Sigma files, retaining correlation metadata in the loader, and surfacing correlation document counts in `hunt` summaries.
+20. Implemented initial streaming Sigma `event_count` correlation with grouped windows, `condition` thresholds, `timespan` parsing, rule references by `name`/`id`/`title`, and `--correlation-scope`.
+21. Added JSONL and pretty correlation match rendering from `stitch hunt`.
+22. Added a weave-generated Sysmon correlation EVTX fixture and fixture-backed CLI test coverage for correlation output.
+23. Added Sigma `value_count` correlation support with distinct value counting from the condition `field`.
+24. Added Sigma `temporal` and `temporal_ordered` correlation support over grouped streaming windows.
+25. Added hunt correlation dependency planning so referenced base rules can feed correlation state even when filtered from normal alert output, while unrelated alert rules do not feed correlation state.
+26. Made `--correlation-max-state` eviction deterministic by removing the oldest state group and added `correlation_state`/`correlation_evicted` hunt stats.
+27. Added parser-focused Sigma syntax fixtures for valid base rules, valid correlation rules, malformed base rules, malformed correlation rules, and broken YAML.
+28. Added loader regression tests that validate the syntax fixture corpus and assert readable diagnostics for common typos and malformations.
+29. Added selected contributing-event details for Sigma correlation output with `--correlation-event-field` and bounded pretty rendering via `--correlation-event-limit`.
 
 Verification:
 
@@ -42,6 +53,16 @@ Verification:
 13. `cargo check --all-targets --all-features`
 14. `cargo test --all-targets --all-features`
 15. `cargo clippy --all-targets --all-features -- -D warnings -W clippy::pedantic`
+16. `PYTHONPATH=../weave python3 -m weave tests/fixtures/source/sysmon-correlation.jsonl tests/fixtures/correlation-evtx/sysmon-correlation.evtx --seed 1010`
+17. `cargo test correlation -- --nocapture`
+18. `cargo fmt --all -- --check`
+19. `cargo test --all-targets --all-features`
+20. `cargo clippy --all-targets --all-features -- -D warnings -W clippy::pedantic`
+21. `cargo test sigma_syntax -- --nocapture`
+22. `cargo fmt --all -- --check`
+23. `cargo test --all-targets --all-features`
+24. `cargo clippy --all-targets --all-features -- -D warnings -W clippy::pedantic`
+25. `cargo check --all-targets --all-features`
 
 ## 2026-06-27
 

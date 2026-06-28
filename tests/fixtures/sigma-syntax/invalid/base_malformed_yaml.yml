@@ -1,0 +1,6 @@
+title: Invalid Malformed YAML
+name: invalid_malformed_yaml
+detection:
+  selection:
+    EventID: [4688
+  condition: selection

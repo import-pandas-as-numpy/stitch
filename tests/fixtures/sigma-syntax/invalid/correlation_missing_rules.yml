@@ -1,0 +1,10 @@
+title: Invalid Correlation Missing Rules
+name: invalid_correlation_missing_rules
+type: correlation
+correlation:
+  type: event_count
+  group-by:
+    - Computer
+  timespan: 5m
+  condition:
+    gte: 2

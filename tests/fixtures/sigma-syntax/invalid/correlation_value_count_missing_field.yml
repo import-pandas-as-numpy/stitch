@@ -1,0 +1,12 @@
+title: Invalid Value Count Missing Field
+name: invalid_value_count_missing_field
+type: correlation
+correlation:
+  type: value_count
+  rules:
+    - some_rule
+  group-by:
+    - Computer
+  timespan: 5m
+  condition:
+    gte: 2

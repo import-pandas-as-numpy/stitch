@@ -155,6 +155,21 @@ pub struct HuntArgs {
     #[arg(long, value_name = "N", default_value_t = 100_000)]
     pub correlation_max_state: usize,
 
+    #[arg(
+        long = "correlation-event-field",
+        value_name = "FIELD",
+        help = "Include selected contributing-event field in correlation output"
+    )]
+    pub correlation_event_fields: Vec<String>,
+
+    #[arg(
+        long = "correlation-event-limit",
+        value_name = "N",
+        default_value_t = 3,
+        help = "Maximum contributing events to print for each pretty correlation match; 0 hides them"
+    )]
+    pub correlation_event_limit: usize,
+
     #[arg(long, value_enum, default_value_t = OutputFormat::Pretty)]
     pub format: OutputFormat,
 

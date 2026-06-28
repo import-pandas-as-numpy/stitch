@@ -8,7 +8,7 @@ use globset::{Glob, GlobSet, GlobSetBuilder};
 use serde_json::json;
 use thiserror::Error;
 
-use crate::cli::{CommonArgs, DumpArgs, HuntArgs, OutputFormat, SearchArgs};
+use crate::cli::{CommonArgs, CorrelationScope, DumpArgs, HuntArgs, OutputFormat, SearchArgs};
 use crate::event::Event;
 use crate::input::{
     DiscoveryConfig, DiscoveryError, EvtxReadError, EvtxRecordError, discover_inputs,
@@ -16,7 +16,10 @@ use crate::input::{
 };
 use crate::output::render_search_match;
 use crate::query::{QueryError, parse_search_query};
-use crate::sigma::{SigmaLoadError, SigmaRule, load_sigma_rules};
+use crate::sigma::{
+    CorrelationRuntimeScope, SigmaCorrelationEngine, SigmaCorrelationMatch, SigmaCorrelationRule,
+    SigmaLoadError, SigmaRule, load_sigma_rules,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CommandOutcome {
@@ -84,10 +87,22 @@ pub fn run_hunt(
 ) -> Result<CommandOutcome, RunError> {
     let inputs = discover_inputs(discovery)?;
     let rules = load_sigma_rules(&command.rules)?;
-    let active_rules = filter_hunt_rules(command, &rules.rules)?;
+    let correlation_rules = rules.correlations.len();
+    let skipped_correlation = 0usize;
+    let hunt_plan = build_hunt_plan(command, &rules.rules, &rules.correlations)?;
+    let mut correlation_engine = if command.disable_correlation {
+        SigmaCorrelationEngine::new(&[], runtime_correlation_scope(command.correlation_scope), 0)
+    } else {
+        SigmaCorrelationEngine::new(
+            &rules.correlations,
+            runtime_correlation_scope(command.correlation_scope),
+            command.correlation_max_state,
+        )
+    };
     let mut output = Vec::new();
     let mut scanned = 0usize;
     let mut matched = 0usize;
+    let mut correlation_matched = 0usize;
 
     for input in &inputs {
         let _read_stats = read_evtx_events_with_errors(
@@ -96,12 +111,33 @@ pub fn run_hunt(
             |event| {
                 scanned += 1;
 
-                for rule in &active_rules {
+                for planned_rule in &hunt_plan.rules {
+                    let rule = planned_rule.rule;
                     if rule.matches(&event) {
-                        matched += 1;
+                        if planned_rule.emit_alert {
+                            matched += 1;
+                        }
 
-                        if !common.quiet {
+                        if planned_rule.emit_alert && !common.quiet {
                             output.push(render_hunt_match(rule, &event, command.format));
+                        }
+
+                        if planned_rule.feed_correlation && !correlation_engine.is_empty() {
+                            for correlation_match in correlation_engine.observe_match(
+                                rule,
+                                &event,
+                                &command.correlation_event_fields,
+                            ) {
+                                correlation_matched += 1;
+
+                                if !common.quiet {
+                                    output.push(render_correlation_match(
+                                        &correlation_match,
+                                        command.format,
+                                        command.correlation_event_limit,
+                                    ));
+                                }
+                            }
                         }
                     }
                 }
@@ -115,25 +151,97 @@ pub fn run_hunt(
     }
 
     if common.stats {
-        output.push(format!(
-            "stats: scanned={} matched={} rules={} skipped_correlation={} inputs={}",
-            scanned,
-            matched,
-            active_rules.len(),
-            rules.skipped.len(),
-            inputs.len()
-        ));
+        if correlation_rules == 0 {
+            output.push(format!(
+                "stats: scanned={} matched={} rules={} skipped_correlation={} inputs={}",
+                scanned,
+                matched,
+                hunt_plan.alert_rule_count,
+                skipped_correlation,
+                inputs.len()
+            ));
+        } else {
+            let correlation_stats = correlation_engine.stats();
+            output.push(format!(
+                "stats: scanned={} matched={} correlation_matched={} rules={} correlation_rules={} correlation_state={} correlation_evicted={} skipped_correlation={} inputs={}",
+                scanned,
+                matched,
+                correlation_matched,
+                hunt_plan.alert_rule_count,
+                correlation_rules,
+                correlation_stats.state_entries,
+                correlation_stats.evicted_state_entries,
+                skipped_correlation,
+                inputs.len()
+            ));
+        }
     } else if output.is_empty() {
         output.push(format!(
-            "hunt loaded {} Sigma rule(s), skipped {} correlation rule(s), discovered {} EVTX input(s), matched 0 event(s)",
-            active_rules.len(),
-            rules.skipped.len(),
+            "hunt loaded {} Sigma rule(s), loaded {} correlation rule(s), skipped {} rule(s), discovered {} EVTX input(s), matched 0 event(s)",
+            hunt_plan.alert_rule_count,
+            correlation_rules,
+            skipped_correlation,
             inputs.len()
         ));
     }
 
     Ok(CommandOutcome {
         message: (!output.is_empty()).then(|| output.join("\n\n")),
+    })
+}
+
+fn runtime_correlation_scope(scope: CorrelationScope) -> CorrelationRuntimeScope {
+    match scope {
+        CorrelationScope::File => CorrelationRuntimeScope::File,
+        CorrelationScope::Host => CorrelationRuntimeScope::Host,
+        CorrelationScope::Global => CorrelationRuntimeScope::Global,
+    }
+}
+
+#[derive(Debug)]
+struct HuntPlan<'a> {
+    rules: Vec<PlannedRule<'a>>,
+    alert_rule_count: usize,
+}
+
+#[derive(Debug)]
+struct PlannedRule<'a> {
+    rule: &'a SigmaRule,
+    emit_alert: bool,
+    feed_correlation: bool,
+}
+
+fn build_hunt_plan<'a>(
+    command: &HuntArgs,
+    rules: &'a [SigmaRule],
+    correlations: &[SigmaCorrelationRule],
+) -> Result<HuntPlan<'a>, RunError> {
+    let alert_rules = filter_hunt_rules(command, rules)?;
+    let alert_rule_count = alert_rules.len();
+    let correlation_enabled = !command.disable_correlation && !correlations.is_empty();
+
+    let planned = rules
+        .iter()
+        .filter_map(|rule| {
+            let emit_alert = alert_rules
+                .iter()
+                .any(|alert_rule| std::ptr::eq(*alert_rule, rule));
+            let feed_correlation = correlation_enabled
+                && correlations.iter().any(|correlation| {
+                    rule.is_referenced_by(&correlation.correlation.referenced_rules)
+                });
+
+            (emit_alert || feed_correlation).then_some(PlannedRule {
+                rule,
+                emit_alert,
+                feed_correlation,
+            })
+        })
+        .collect();
+
+    Ok(HuntPlan {
+        rules: planned,
+        alert_rule_count,
     })
 }
 
@@ -397,6 +505,7 @@ fn render_hunt_pretty(rule: &SigmaRule, event: &Event) -> String {
 
 fn render_hunt_json(rule: &SigmaRule, event: &Event, format: OutputFormat) -> String {
     let value = json!({
+        "type": "sigma_match",
         "rule": {
             "title": rule.title,
             "id": rule.id,
@@ -417,6 +526,160 @@ fn render_hunt_json(rule: &SigmaRule, event: &Event, format: OutputFormat) -> St
                 "collection_root": event.source.collection_root,
             }
         }
+    });
+
+    if matches!(format, OutputFormat::Json) {
+        serde_json::to_string_pretty(&value)
+            .expect("serializing a serde_json::Value should not fail")
+    } else {
+        value.to_string()
+    }
+}
+
+fn render_correlation_match(
+    correlation_match: &SigmaCorrelationMatch,
+    format: OutputFormat,
+    event_limit: usize,
+) -> String {
+    match format {
+        OutputFormat::Json | OutputFormat::Jsonl => {
+            render_correlation_json(correlation_match, format)
+        }
+        OutputFormat::Pretty
+        | OutputFormat::Compact
+        | OutputFormat::Csv
+        | OutputFormat::Timeline => render_correlation_pretty(correlation_match, event_limit),
+    }
+}
+
+fn render_correlation_pretty(
+    correlation_match: &SigmaCorrelationMatch,
+    event_limit: usize,
+) -> String {
+    let level = correlation_match.rule.level.as_deref().unwrap_or("-");
+    let group = if correlation_match.group.is_empty() {
+        "global".to_owned()
+    } else {
+        correlation_match
+            .group
+            .iter()
+            .map(|(field, value)| format!("{field}={value}"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+
+    let mut output = format!(
+        "{}  {level}  correlation  {}  count={}\n  group: {group}  window: {}..{}",
+        correlation_match.window_end,
+        correlation_match.rule.title,
+        correlation_match.matches.len(),
+        correlation_match.window_start,
+        correlation_match.window_end
+    );
+
+    if event_limit > 0
+        && correlation_match
+            .matches
+            .iter()
+            .any(|source| !source.fields.is_empty())
+    {
+        let shown = correlation_match.matches.len().min(event_limit);
+        let _ = write!(output, "\n  contributing events:");
+
+        for source_match in correlation_match.matches.iter().take(event_limit) {
+            let event_id = source_match
+                .event_id
+                .map_or_else(|| "-".to_owned(), |value| value.to_string());
+            let record_id = source_match
+                .record_id
+                .map_or_else(|| "-".to_owned(), |value| value.to_string());
+            let channel = source_match.channel.as_deref().unwrap_or("-");
+            let _ = write!(
+                output,
+                "\n    {}  {}  event_id={}  record={}  rule={}",
+                source_match.timestamp, channel, event_id, record_id, source_match.rule_title
+            );
+
+            for (field, value) in &source_match.fields {
+                let value = value.as_deref().unwrap_or("-");
+                let _ = write!(output, "\n      {field}: {value}");
+            }
+        }
+
+        if correlation_match.matches.len() > shown {
+            let remaining = correlation_match.matches.len() - shown;
+            let _ = write!(
+                output,
+                "\n    ... {remaining} more contributing event(s); increase --correlation-event-limit to show more"
+            );
+        }
+    }
+
+    output
+}
+
+fn render_correlation_json(
+    correlation_match: &SigmaCorrelationMatch,
+    format: OutputFormat,
+) -> String {
+    let group = correlation_match
+        .group
+        .iter()
+        .map(|(field, value)| (field.clone(), json!(value)))
+        .collect::<serde_json::Map<_, _>>();
+    let matches = correlation_match
+        .matches
+        .iter()
+        .map(|source_match| {
+            let fields = source_match
+                .fields
+                .iter()
+                .map(|(field, value)| {
+                    let value = value
+                        .as_ref()
+                        .map_or(serde_json::Value::Null, |value| json!(value));
+                    (field.clone(), value)
+                })
+                .collect::<serde_json::Map<_, _>>();
+
+            json!({
+                "rule": {
+                    "title": source_match.rule_title,
+                    "id": source_match.rule_id,
+                    "name": source_match.rule_name,
+                },
+                "event": {
+                    "timestamp": source_match.timestamp,
+                    "record_id": source_match.record_id,
+                    "channel": source_match.channel,
+                    "event_id": source_match.event_id,
+                    "computer": source_match.computer,
+                    "source": {
+                        "file_path": source_match.file_path,
+                    },
+                    "fields": fields,
+                }
+            })
+        })
+        .collect::<Vec<_>>();
+    let value = json!({
+        "type": "sigma_correlation_match",
+        "timestamp": correlation_match.window_end,
+        "rule": {
+            "title": correlation_match.rule.title,
+            "id": correlation_match.rule.id,
+            "name": correlation_match.rule.name,
+            "level": correlation_match.rule.level,
+            "status": correlation_match.rule.status,
+            "tags": correlation_match.rule.tags,
+            "path": correlation_match.rule.path,
+        },
+        "group": group,
+        "window": {
+            "start": correlation_match.window_start,
+            "end": correlation_match.window_end,
+        },
+        "matches": matches,
     });
 
     if matches!(format, OutputFormat::Json) {
@@ -641,6 +904,51 @@ mod tests {
     }
 
     #[test]
+    fn hunt_plan_feeds_correlation_dependencies_even_when_alert_filtered() {
+        let dependency_rule = SigmaRule::test_rule("Dependency Rule", Some("medium".to_owned()));
+        let alert_rule = SigmaRule::test_rule("Alert Rule", Some("high".to_owned()));
+        let rules = vec![dependency_rule, alert_rule];
+        let correlations = vec![SigmaCorrelationRule {
+            path: PathBuf::from("correlation.yml"),
+            name: Some("dependency_correlation".to_owned()),
+            title: "Dependency Correlation".to_owned(),
+            id: None,
+            status: Some("test".to_owned()),
+            level: Some("high".to_owned()),
+            tags: Vec::new(),
+            correlation: crate::sigma::CorrelationDefinition {
+                kind: crate::sigma::CorrelationKind::EventCount,
+                referenced_rules: vec!["dependency_rule".to_owned()],
+                group_by: Vec::new(),
+                timespan: time::Duration::minutes(5),
+                condition: Some(crate::sigma::CountCondition::test_gte(1)),
+                value_fields: Vec::new(),
+            },
+        }];
+        let mut command = hunt_args();
+        command.min_level = Some("high".to_owned());
+
+        let plan = build_hunt_plan(&command, &rules, &correlations).expect("plan should build");
+
+        assert_eq!(plan.alert_rule_count, 1);
+        assert_eq!(plan.rules.len(), 2);
+        assert!(
+            plan.rules
+                .iter()
+                .any(|rule| rule.rule.title == "Dependency Rule"
+                    && !rule.emit_alert
+                    && rule.feed_correlation),
+            "filtered dependency rule should still feed correlation"
+        );
+        assert!(
+            plan.rules.iter().any(|rule| rule.rule.title == "Alert Rule"
+                && rule.emit_alert
+                && !rule.feed_correlation),
+            "non-referenced alert rule should not feed correlation"
+        );
+    }
+
+    #[test]
     fn stats_include_bounded_parse_error_samples() {
         let mut stats = SearchStats {
             scanned: 10,
@@ -752,6 +1060,8 @@ mod tests {
             correlation_scope: CorrelationScope::Host,
             correlation_lateness: "2m".to_owned(),
             correlation_max_state: 100_000,
+            correlation_event_fields: Vec::new(),
+            correlation_event_limit: 3,
             format: OutputFormat::Pretty,
             output: None,
             min_level: None,

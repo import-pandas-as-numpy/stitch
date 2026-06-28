@@ -1,0 +1,10 @@
+title: Invalid Correlation Bad Timespan
+name: invalid_correlation_bad_timespan
+type: correlation
+correlation:
+  type: event_count
+  rules:
+    - some_rule
+  timespan: five minutes
+  condition:
+    gte: 2

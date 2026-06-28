@@ -1,0 +1,8 @@
+title: Invalid Unsupported Modifier Typo
+name: invalid_unsupported_modifier_typo
+logsource:
+  product: windows
+detection:
+  selection:
+    CommandLine|containz: 'powershell'
+  condition: selection

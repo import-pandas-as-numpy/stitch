@@ -1,0 +1,97 @@
+---
+title: Synthetic Sysmon Process Activity
+name: synthetic_sysmon_process_activity
+id: 55555555-5555-5555-5555-555555555555
+status: test
+level: medium
+detection:
+  selection:
+    EventID:
+      - 1
+      - 3
+      - 11
+      - 22
+    ProcessGuid|exists: true
+  condition: selection
+---
+title: Synthetic Sysmon Process Start
+name: synthetic_sysmon_process_start
+id: 88888888-8888-8888-8888-888888888888
+status: test
+level: medium
+detection:
+  selection:
+    EventID: 1
+    ProcessGuid|exists: true
+  condition: selection
+---
+title: Synthetic Sysmon Process Network
+name: synthetic_sysmon_process_network
+id: 99999999-9999-9999-9999-999999999999
+status: test
+level: medium
+detection:
+  selection:
+    EventID: 3
+    ProcessGuid|exists: true
+  condition: selection
+---
+title: Synthetic Sysmon Process File Write
+name: synthetic_sysmon_process_file_write
+id: aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa
+status: test
+level: medium
+detection:
+  selection:
+    EventID: 11
+    ProcessGuid|exists: true
+  condition: selection
+---
+title: Synthetic Sysmon Repeated Process Activity Correlation
+name: synthetic_sysmon_repeated_process_activity
+id: 66666666-6666-6666-6666-666666666666
+status: test
+level: high
+type: correlation
+correlation:
+  type: event_count
+  rules:
+    - synthetic_sysmon_process_activity
+  group-by:
+    - ProcessGuid
+  condition:
+    gte: 3
+  timespan: 5m
+---
+title: Synthetic Sysmon Distinct Process Event Types Correlation
+name: synthetic_sysmon_distinct_process_event_types
+id: 77777777-7777-7777-7777-777777777777
+status: test
+level: high
+type: correlation
+correlation:
+  type: value_count
+  rules:
+    - synthetic_sysmon_process_activity
+  group-by:
+    - ProcessGuid
+  condition:
+    field: EventID
+    gte: 3
+  timespan: 5m
+---
+title: Synthetic Sysmon Ordered Process Activity Correlation
+name: synthetic_sysmon_ordered_process_activity
+id: bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb
+status: test
+level: high
+type: correlation
+correlation:
+  type: temporal_ordered
+  rules:
+    - synthetic_sysmon_process_start
+    - synthetic_sysmon_process_network
+    - synthetic_sysmon_process_file_write
+  group-by:
+    - ProcessGuid
+  timespan: 5m
