@@ -23,6 +23,7 @@ Completed:
 15. Added `tests/fixtures/sigma-grammar` to validate broader Sigma grammar against generated EVTX fixtures.
 16. Implemented the remaining local-evaluable non-correlation Sigma modifiers: `exists`, `neq`, numeric comparisons, regex `i/m/s`, `windash`, Base64/UTF-16 encodings, `fieldref`, and time extractors.
 17. Kept `expand` as a clear unsupported rule-load diagnostic because Sigma placeholder expansion requires environment-specific placeholder configuration.
+18. Published a private GitHub backup at `https://github.com/import-pandas-as-numpy/stitch` and pushed the initial `main` branch.
 
 Verification:
 
