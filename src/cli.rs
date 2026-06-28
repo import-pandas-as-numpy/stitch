@@ -26,7 +26,7 @@ pub struct CommonArgs {
         long,
         value_name = "PATH",
         global = true,
-        help = "File or directory input"
+        help = "File or directory input; defaults to the current directory"
     )]
     pub input: Vec<PathBuf>,
 

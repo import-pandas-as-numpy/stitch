@@ -36,11 +36,10 @@ Build:
 cargo build --release
 ```
 
-Search an EVTX file:
+Search EVTX files under the current directory:
 
 ```bash
 target/release/stitch search \
-  -i tests/fixtures/evtx/security-auth.evtx \
   --query 'event.id == 4625' \
   --format jsonl
 ```
@@ -129,6 +128,9 @@ stitch dump -i tests/fixtures/evtx/security-auth.evtx \
 right now.
 
 ## Input Model
+
+When no input path is specified, `stitch` recursively searches the current
+working directory as if `-i .` had been passed.
 
 All primary commands support:
 
