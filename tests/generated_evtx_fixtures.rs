@@ -54,6 +54,35 @@ fn repeated_paths_file(paths: &[&str], repetitions: usize) -> tempfile::NamedTem
 }
 
 #[test]
+fn search_defaults_to_current_directory_when_input_is_omitted() {
+    let mut command = stitch();
+    command.current_dir("tests/fixtures/evtx").args([
+        "search",
+        "--query",
+        "event.id == 4625",
+        "--format",
+        "jsonl",
+        "--limit",
+        "1",
+    ]);
+
+    let output = run_with_timeout(command, Duration::from_secs(10));
+
+    assert!(
+        output.status.success(),
+        "search without explicit input should scan the current directory\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8(output.stdout).expect("search output should be UTF-8");
+    assert!(
+        stdout.contains(r#""event_id":4625"#),
+        "expected omitted-input search to find failed logon event, got:\n{stdout}"
+    );
+}
+
+#[test]
 fn search_parallel_jobs_match_single_worker_with_timeout() {
     let paths = repeated_paths_file(
         &[

@@ -35,8 +35,6 @@ impl DiscoveredInput {
 
 #[derive(Debug, Error)]
 pub enum DiscoveryError {
-    #[error("no input paths were provided")]
-    NoInputs,
     #[error("input path is neither a file nor directory: {path}")]
     UnsupportedInput { path: PathBuf },
     #[error("failed to read input path file {path}: {source}")]
@@ -109,7 +107,7 @@ impl TryFrom<&CommonArgs> for DiscoveryConfig {
         }
 
         if roots.is_empty() {
-            return Err(DiscoveryError::NoInputs);
+            roots.push(PathBuf::from("."));
         }
 
         let include = build_glob_set(GlobKind::Include, &args.include)?;
@@ -332,6 +330,33 @@ mod tests {
             paths,
             vec!["Security.evtx", "nested/Sysmon.evtx"],
             "include and exclude globs should filter discovered files"
+        );
+    }
+
+    #[test]
+    fn defaults_to_current_directory_when_no_roots_are_provided() {
+        let common = CommonArgs {
+            input: Vec::new(),
+            paths_from: None,
+            no_recursive: false,
+            jobs: 0,
+            no_progress: false,
+            quiet: false,
+            strict: false,
+            timezone: None,
+            from: None,
+            to: None,
+            include: Vec::new(),
+            exclude: Vec::new(),
+            stats: false,
+        };
+
+        let config = DiscoveryConfig::try_from(&common).expect("default discovery should build");
+
+        assert_eq!(
+            config.roots(),
+            [PathBuf::from(".")],
+            "omitted input roots should behave as if the current directory was passed"
         );
     }
 

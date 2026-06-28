@@ -106,15 +106,17 @@ Initial input support:
 1. One EVTX file.
 2. An arbitrary directory tree containing nested EVTX files.
 3. A newline-delimited list of paths via `--paths-from`.
+4. The current working directory when no input path is specified.
 
 Input behavior:
 
 1. All primary modes must support both a single EVTX file and nested directory collections.
-2. Directory processing must preserve each event's source file path.
-3. Multiple machines may appear in one file, one directory, or one merged collection.
-4. Machine and channel identity must be derived from event metadata first, especially EVTX `System` metadata such as `Computer` and `Channel`, not from directory names.
-5. Directory and file names may be used as fallback context, but they must not override event-provided machine or channel values.
-6. Results must make machine and channel boundaries clear in human and machine output.
+2. When no input path is specified, commands behave as if `-i .` was passed.
+3. Directory processing must preserve each event's source file path.
+4. Multiple machines may appear in one file, one directory, or one merged collection.
+5. Machine and channel identity must be derived from event metadata first, especially EVTX `System` metadata such as `Computer` and `Channel`, not from directory names.
+6. Directory and file names may be used as fallback context, but they must not override event-provided machine or channel values.
+7. Results must make machine and channel boundaries clear in human and machine output.
 
 Future input support:
 

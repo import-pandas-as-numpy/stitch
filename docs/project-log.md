@@ -207,6 +207,7 @@ Verification:
 149. Benchmarked the quiet fast path with `STITCH_BENCH_REPETITIONS=1000 scripts/bench-local.sh`: search quiet improved from `real 0.38` to `0.23`, non-correlation hunt quiet improved from `real 0.39` to `0.36` at `--jobs 1` and from `0.11` to `0.06` at `--jobs 4`, while dump stayed effectively flat.
 150. Added Dependabot grouped updates for Cargo runtime dependencies, Cargo development dependencies, and GitHub Actions.
 151. Configured CI to skip documentation-only changes while still running for code, tests, Cargo metadata, scripts, workflows, and Dependabot configuration.
+152. Changed input discovery so omitted input paths default to the current working directory, making commands like `stitch search -q 'event.id == 4625'` valid.
 
 ## 2026-06-27
 
