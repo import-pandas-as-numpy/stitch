@@ -4,6 +4,7 @@ Status: Draft
 Last updated: 2026-06-28
 
 GitHub Actions workflows live under `.github/workflows`.
+Dependabot configuration lives at `.github/dependabot.yml`.
 
 ## Security Posture
 
@@ -33,6 +34,10 @@ The current pinned actions are:
 3. `test`: restores Cargo registry/git cache, runs `cargo check`, then runs tests.
 4. `benchmark-smoke`: validates and smoke-runs the local benchmark harness.
 
+Documentation-only changes under `docs/**`, top-level Markdown files, and
+`README*` files skip the full CI workflow. Code, tests, Cargo metadata, scripts,
+workflows, and Dependabot configuration still run CI.
+
 Cargo cache reuse is limited to `~/.cargo/git` and `~/.cargo/registry`.
 `target/` is intentionally not cached because compiled build artifacts are
 larger, less portable across job shapes, and less attractive for a security-first
@@ -49,3 +54,14 @@ Local audit command:
 ```bash
 zizmor --persona pedantic .github/workflows
 ```
+
+## Dependency Updates
+
+`.github/dependabot.yml` runs weekly grouped update checks:
+
+1. Cargo runtime dependencies are grouped as `rust-runtime`.
+2. Cargo development dependencies are grouped as `rust-development`.
+3. GitHub Actions updates are grouped as `github-actions`.
+
+Grouped updates keep PR volume low while still letting CI, Clippy, tests,
+benchmark smoke coverage, Socket, and Zizmor evaluate each update set together.

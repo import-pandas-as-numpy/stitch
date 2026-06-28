@@ -205,6 +205,8 @@ Verification:
 147. Benchmarked a candidate Sigma case-insensitive matching optimization before/after and rejected it because it did not improve performance (`real 3.73s` before, `real 3.88s` after on the audit fixture loop).
 148. Added a performance-only quiet search/hunt fast path that scans EVTX records as JSON bytes when match results are not observable (`--quiet` without `--stats`, and without `--limit` for search).
 149. Benchmarked the quiet fast path with `STITCH_BENCH_REPETITIONS=1000 scripts/bench-local.sh`: search quiet improved from `real 0.38` to `0.23`, non-correlation hunt quiet improved from `real 0.39` to `0.36` at `--jobs 1` and from `0.11` to `0.06` at `--jobs 4`, while dump stayed effectively flat.
+150. Added Dependabot grouped updates for Cargo runtime dependencies, Cargo development dependencies, and GitHub Actions.
+151. Configured CI to skip documentation-only changes while still running for code, tests, Cargo metadata, scripts, workflows, and Dependabot configuration.
 
 ## 2026-06-27
 
