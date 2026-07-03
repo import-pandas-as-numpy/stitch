@@ -22,6 +22,9 @@ fn main() -> ExitCode {
             if let Some(message) = outcome.message {
                 println!("{message}");
             }
+            if let Some(diagnostic) = outcome.diagnostic {
+                eprintln!("{diagnostic}");
+            }
 
             ExitCode::SUCCESS
         }

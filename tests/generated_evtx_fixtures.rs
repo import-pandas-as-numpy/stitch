@@ -1002,3 +1002,40 @@ fn generated_nested_collection_is_discovered_recursively() {
         "expected the nested generated collection to parse cleanly, got:\n{stdout}"
     );
 }
+
+#[test]
+fn search_quiet_still_emits_jsonl_results() {
+    let output = stitch()
+        .args([
+            "search",
+            "-i",
+            "tests/fixtures/evtx/security-auth.evtx",
+            "--query",
+            "event.id == 4625",
+            "--format",
+            "jsonl",
+            "--quiet",
+        ])
+        .output()
+        .expect("stitch search should run with quiet JSONL output");
+
+    assert!(
+        output.status.success(),
+        "stitch search failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout =
+        String::from_utf8(output.stdout).expect("stitch search quiet output should be valid UTF-8");
+    let lines = stdout.lines().collect::<Vec<_>>();
+
+    assert_eq!(
+        lines.len(),
+        1,
+        "quiet search should emit the matching JSONL row, got:\n{stdout}"
+    );
+
+    let value: serde_json::Value =
+        serde_json::from_str(lines[0]).expect("quiet search output line should be JSON");
+    assert_eq!(value["event_id"], 4625);
+}

@@ -520,3 +520,89 @@ fn search_cli_still_handles_ad_hoc_fixture_queries() {
         "expected limit-constrained ad hoc query to match one event, got:\n{stdout}"
     );
 }
+
+#[test]
+fn hunt_jsonl_zero_match_stdout_stays_empty() {
+    let output = stitch()
+        .args([
+            "hunt",
+            "-i",
+            "tests/fixtures/evtx/security-auth.evtx",
+            "--rules",
+            "tests/fixtures/sigma/sysmon_powershell_network.yml",
+            "--format",
+            "jsonl",
+            "--no-progress",
+        ])
+        .output()
+        .expect("stitch hunt should run zero-match JSONL case");
+
+    assert!(
+        output.status.success(),
+        "stitch hunt failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    assert!(
+        output.stdout.is_empty(),
+        "zero-match hunt JSONL stdout should contain only records, got:\n{}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    assert!(
+        output.stderr.is_empty(),
+        "zero-match hunt without --summary should not emit diagnostics, got:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn hunt_summary_with_matches_is_written_to_stderr() {
+    let paths = repeated_paths_file(&["tests/fixtures/evtx/sysmon-activity.evtx"], 3);
+    let output = stitch()
+        .args([
+            "--paths-from",
+            paths.path().to_str().expect("temp path should be UTF-8"),
+            "hunt",
+            "--rules",
+            "tests/fixtures/sigma/sysmon_powershell_network.yml",
+            "--format",
+            "jsonl",
+            "--no-progress",
+            "--summary",
+        ])
+        .output()
+        .expect("stitch hunt should run summary JSONL case");
+
+    assert!(
+        output.status.success(),
+        "stitch hunt failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8(output.stdout)
+        .expect("stitch hunt output should be valid UTF-8 for JSONL results");
+    let stderr = String::from_utf8(output.stderr).expect("summary should be valid UTF-8");
+    let json_lines = stdout
+        .lines()
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        json_lines.len(),
+        3,
+        "expected one JSONL record per matching fixture input, got:\n{stdout}"
+    );
+
+    for line in json_lines {
+        let value: serde_json::Value =
+            serde_json::from_str(line).expect("hunt stdout line should be JSON");
+        assert_eq!(value["type"], "sigma_match");
+    }
+
+    assert!(
+        stderr.contains("hunt loaded 1 Sigma rule(s)")
+            && stderr.contains("discovered 3 EVTX input(s)")
+            && stderr.contains("matched 3 event(s)"),
+        "expected hunt summary on stderr, got:\n{stderr}"
+    );
+}

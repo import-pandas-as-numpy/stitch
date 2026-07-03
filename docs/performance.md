@@ -140,7 +140,7 @@ faster than `--jobs 1`. This is expected to overstate benefits for tiny input
 sets and understate or differ from benefits on large real-world EVTX
 collections.
 
-#### 2026-06-28 Quiet Search/Hunt Fast Path
+#### 2026-06-28 Quiet Hunt Fast Path
 
 Command:
 
@@ -150,13 +150,11 @@ STITCH_BENCH_REPETITIONS=1000 scripts/bench-local.sh
 
 Change:
 
-1. `search --quiet` without `--stats` or `--limit` scans EVTX records through
-   the parser's JSON-byte rendering path instead of materializing
-   `serde_json::Value` events and evaluating predicates whose results are not
-   observable.
-2. Non-correlation `hunt --quiet` without `--stats` uses the same record-scan
+1. Non-correlation `hunt --quiet` without `--stats` uses the record-scan
    path after rule loading, preserving EVTX open/parse error behavior while
    avoiding match rendering and rule evaluation.
+2. `search --quiet` still renders matching records. Quiet mode suppresses
+   non-result messages, not query output.
 
 Before:
 
