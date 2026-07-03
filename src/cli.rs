@@ -64,9 +64,6 @@ pub struct CommonArgs {
     )]
     pub strict: bool,
 
-    #[arg(long, value_name = "TZ", global = true, help = "Display timezone")]
-    pub timezone: Option<String>,
-
     #[arg(
         long,
         value_name = "TIMESTAMP",
@@ -405,6 +402,38 @@ mod tests {
                 .to_string()
                 .contains("unexpected argument '--flatten'"),
             "unimplemented dump flag should fail as an unexpected argument, got:\n{error}"
+        );
+    }
+
+    #[test]
+    fn global_help_does_not_advertise_timezone() {
+        let help = Cli::command().render_help().to_string();
+
+        assert!(
+            !help.contains("--timezone"),
+            "global help should not list unimplemented --timezone flag:\n{help}"
+        );
+    }
+
+    #[test]
+    fn timezone_is_rejected_at_parse_time() {
+        let error = Cli::try_parse_from([
+            "stitch",
+            "search",
+            "-i",
+            "Security.evtx",
+            "-q",
+            "event.id == 4625",
+            "--timezone",
+            "America/New_York",
+        ])
+        .expect_err("unimplemented --timezone should be rejected by the parser");
+
+        assert!(
+            error
+                .to_string()
+                .contains("unexpected argument '--timezone'"),
+            "unimplemented timezone flag should fail as an unexpected argument, got:\n{error}"
         );
     }
 }
