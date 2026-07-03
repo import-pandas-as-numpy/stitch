@@ -2,7 +2,7 @@ use std::{
     collections::HashMap,
     fmt::Write as _,
     fs::{self, File},
-    io::{BufWriter, Stdout, Write as _},
+    io::{BufWriter, IsTerminal as _, Stdout, Write as _},
 };
 
 use globset::{Glob, GlobSet, GlobSetBuilder};
@@ -18,7 +18,10 @@ use crate::input::{
     DiscoveredInput, DiscoveryConfig, DiscoveryError, EvtxReadError, EvtxRecordError,
     discover_inputs, read_evtx_events_with_errors, read_evtx_records_with_errors,
 };
-use crate::output::{dump_json_value, render_event_payload, render_search_match};
+use crate::output::{
+    DisplayStyle, dump_json_value, render_event_payload, render_search_match,
+    search_match_delimiter,
+};
 use crate::query::{QueryError, parse_search_query};
 use crate::sigma::{
     CorrelationRuntimeScope, SigmaCorrelationEngine, SigmaCorrelationMatch, SigmaCorrelationRule,
@@ -735,13 +738,14 @@ pub fn run_search(
     }
 
     let output_fields = search_output_fields(command, &query.keep_fields);
+    let style = search_display_style(common);
     let inputs = discover_inputs(discovery)?;
     let mut output = Vec::new();
     let mut stats = SearchStats::default();
     let mut error_writer = ErrorWriter::new(command.errors.as_ref())?;
 
     if command.limit.is_some() || !should_parallelize(&inputs, common) {
-        let mut stdout = SearchOutput::stdout();
+        let mut stdout = SearchOutput::stdout(format, style);
 
         for input in &inputs {
             if reached_limit(command.limit, stats.matched) {
@@ -761,7 +765,7 @@ pub fn run_search(
                     if query.matches(&event) {
                         stats.matched += 1;
 
-                        stdout.write(&render_search_match(&event, output_fields, format));
+                        stdout.write(&render_search_match(&event, output_fields, format, style));
                     }
                 },
                 |error| error_writer.write(error),
@@ -772,7 +776,7 @@ pub fn run_search(
         }
 
         if common.stats && !common.quiet {
-            stdout.write(&stats.render());
+            stdout.write_text(&stats.render());
         }
 
         error_writer.finish()?;
@@ -784,7 +788,7 @@ pub fn run_search(
         });
     } else if should_parallelize(&inputs, common) {
         for result in run_parallel_by_input(&inputs, common, |input| {
-            process_search_input(input, &query, output_fields, format, common)
+            process_search_input(input, &query, output_fields, format, style, common)
         })? {
             stats.merge(result.stats);
 
@@ -801,7 +805,7 @@ pub fn run_search(
         }
     } else {
         for input in &inputs {
-            let result = process_search_input(input, &query, output_fields, format, common)?;
+            let result = process_search_input(input, &query, output_fields, format, style, common)?;
             stats.merge(result.stats);
 
             for error in &result.errors {
@@ -824,7 +828,7 @@ pub fn run_search(
     }
 
     Ok(CommandOutcome {
-        message: (!output.is_empty()).then(|| output.join("\n\n")),
+        message: (!output.is_empty()).then(|| join_search_output(&output, format, style)),
         diagnostic: None,
     })
 }
@@ -844,28 +848,49 @@ struct SearchRenderedEvent {
 struct SearchOutput {
     writer: BufWriter<Stdout>,
     records_written: usize,
+    format: OutputFormat,
+    style: DisplayStyle,
     error: Option<std::io::Error>,
 }
 
 impl SearchOutput {
-    fn stdout() -> Self {
+    fn stdout(format: OutputFormat, style: DisplayStyle) -> Self {
         Self {
             writer: BufWriter::new(std::io::stdout()),
             records_written: 0,
+            format,
+            style,
             error: None,
         }
     }
 
     fn write(&mut self, rendered: &str) {
+        self.write_section(rendered, true);
+    }
+
+    fn write_text(&mut self, rendered: &str) {
+        self.write_section(rendered, false);
+    }
+
+    fn write_section(&mut self, rendered: &str, match_separator: bool) {
         if self.error.is_some() {
             return;
         }
 
-        if self.records_written > 0
-            && let Err(source) = writeln!(self.writer, "\n")
-        {
-            self.error = Some(source);
-            return;
+        if self.records_written > 0 {
+            let delimiter = match_separator
+                .then(|| search_match_delimiter(self.format, self.style))
+                .filter(|delimiter| !delimiter.is_empty());
+            let separator_result = if let Some(delimiter) = delimiter {
+                writeln!(self.writer, "\n{delimiter}\n")
+            } else {
+                writeln!(self.writer, "\n")
+            };
+
+            if let Err(source) = separator_result {
+                self.error = Some(source);
+                return;
+            }
         }
 
         if let Err(source) = write!(self.writer, "{rendered}") {
@@ -895,6 +920,7 @@ fn process_search_input(
     query: &crate::query::SearchQuery,
     output_fields: &[String],
     format: OutputFormat,
+    style: DisplayStyle,
     common: &CommonArgs,
 ) -> Result<SearchInputResult, RunError> {
     let mut result = SearchInputResult::default();
@@ -906,7 +932,7 @@ fn process_search_input(
             if query.matches(&event) {
                 result.stats.matched += 1;
                 result.output.push(SearchRenderedEvent {
-                    output: Some(render_search_match(&event, output_fields, format)),
+                    output: Some(render_search_match(&event, output_fields, format, style)),
                 });
             }
         },
@@ -920,6 +946,24 @@ fn process_search_input(
         .add_parse_error_samples(read_stats.error_samples);
 
     Ok(result)
+}
+
+fn search_display_style(common: &CommonArgs) -> DisplayStyle {
+    if common.no_color || !std::io::stdout().is_terminal() {
+        DisplayStyle::Plain
+    } else {
+        DisplayStyle::Color
+    }
+}
+
+fn join_search_output(output: &[String], format: OutputFormat, style: DisplayStyle) -> String {
+    let delimiter = search_match_delimiter(format, style);
+
+    if delimiter.is_empty() {
+        output.join("\n\n")
+    } else {
+        output.join(&format!("\n\n{delimiter}\n\n"))
+    }
 }
 
 pub fn run_dump(

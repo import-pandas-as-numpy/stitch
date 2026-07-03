@@ -88,6 +88,13 @@ pub struct CommonArgs {
 
     #[arg(long, global = true, help = "Print processing stats")]
     pub stats: bool,
+
+    #[arg(
+        long,
+        global = true,
+        help = "Disable ANSI color in human-readable output"
+    )]
+    pub no_color: bool,
 }
 
 #[derive(Debug, Subcommand)]
