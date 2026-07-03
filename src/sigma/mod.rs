@@ -330,6 +330,11 @@ impl SigmaRule {
     }
 
     #[must_use]
+    pub fn required_channels(&self) -> Option<Vec<String>> {
+        required_channels(&self.logsource, &self.detection.prefilter)
+    }
+
+    #[must_use]
     pub fn is_referenced_by(&self, references: &[String]) -> bool {
         references
             .iter()
@@ -696,6 +701,18 @@ impl SigmaMetadataPrefilter {
         event_ids
     }
 
+    fn required_channels(&self) -> Option<Vec<String>> {
+        let mut channels = None;
+
+        for predicate in &self.predicates {
+            if predicate.field == "channel" {
+                channels = channel_values(predicate);
+            }
+        }
+
+        channels
+    }
+
     #[cfg(test)]
     fn len(&self) -> usize {
         self.predicates.len()
@@ -722,6 +739,63 @@ fn event_id_values(predicate: &FieldPredicate) -> Option<Vec<u64>> {
     }
 
     Some(values)
+}
+
+fn required_channels(
+    logsource: &LogsourcePrefilter,
+    metadata: &SigmaMetadataPrefilter,
+) -> Option<Vec<String>> {
+    match (
+        non_empty_channels(&logsource.channels),
+        metadata.required_channels(),
+    ) {
+        (None, None) => None,
+        (Some(channels), None) | (None, Some(channels)) => Some(channels),
+        (Some(logsource_channels), Some(metadata_channels)) => {
+            Some(intersect_channels(&logsource_channels, &metadata_channels))
+        }
+    }
+}
+
+fn non_empty_channels(channels: &[String]) -> Option<Vec<String>> {
+    (!channels.is_empty()).then(|| channels.to_vec())
+}
+
+fn channel_values(predicate: &FieldPredicate) -> Option<Vec<String>> {
+    let FieldMatcher::Equals { require_all, .. } = predicate.matcher else {
+        return None;
+    };
+
+    let mut values = predicate
+        .values
+        .iter()
+        .map(|value| match value {
+            SigmaValue::String(value) => Some(value.clone()),
+            SigmaValue::Number(_) | SigmaValue::Bool(_) | SigmaValue::Null => None,
+        })
+        .collect::<Option<Vec<_>>>()?;
+
+    if require_all && values.len() != 1 {
+        return None;
+    }
+
+    sort_dedup_case_insensitive(&mut values);
+    Some(values)
+}
+
+fn intersect_channels(left: &[String], right: &[String]) -> Vec<String> {
+    let mut channels = left
+        .iter()
+        .filter(|left| right.iter().any(|right| left.eq_ignore_ascii_case(right)))
+        .cloned()
+        .collect::<Vec<_>>();
+    sort_dedup_case_insensitive(&mut channels);
+    channels
+}
+
+fn sort_dedup_case_insensitive(values: &mut Vec<String>) {
+    values.sort_by_key(|value| value.to_ascii_lowercase());
+    values.dedup_by(|left, right| left.eq_ignore_ascii_case(right));
 }
 
 fn collect_condition_prefilters(
