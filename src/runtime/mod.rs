@@ -2,7 +2,7 @@ use std::{
     collections::HashMap,
     fmt::Write as _,
     fs::{self, File},
-    io::{BufWriter, Write as _},
+    io::{BufWriter, Stdout, Write as _},
 };
 
 use globset::{Glob, GlobSet, GlobSetBuilder};
@@ -62,6 +62,8 @@ pub enum RunError {
     },
     #[error("search requires --query or --query-file")]
     MissingQuery,
+    #[error("failed to write output to stdout: {0}")]
+    StdoutWrite(std::io::Error),
     #[error(
         "invalid Sigma level {level:?}; expected informational, low, medium, high, or critical"
     )]
@@ -677,7 +679,9 @@ pub fn run_search(
     let mut stats = SearchStats::default();
     let mut error_writer = ErrorWriter::new(command.errors.as_ref())?;
 
-    if command.limit.is_some() {
+    if command.limit.is_some() || !should_parallelize(&inputs, common) {
+        let mut stdout = SearchOutput::stdout();
+
         for input in &inputs {
             if reached_limit(command.limit, stats.matched) {
                 break;
@@ -696,7 +700,7 @@ pub fn run_search(
                     if query.matches(&event) {
                         stats.matched += 1;
 
-                        output.push(render_search_match(&event, output_fields, format));
+                        stdout.write(&render_search_match(&event, output_fields, format));
                     }
                 },
                 |error| error_writer.write(error),
@@ -705,6 +709,18 @@ pub fn run_search(
             stats.parse_errors += read_stats.records_failed;
             stats.add_parse_error_samples(read_stats.error_samples);
         }
+
+        if common.stats && !common.quiet {
+            stdout.write(&stats.render());
+        }
+
+        error_writer.finish()?;
+        let output = stdout.finish()?;
+
+        return Ok(CommandOutcome {
+            message: (!output.is_empty()).then(|| output.join("\n\n")),
+            diagnostic: None,
+        });
     } else if should_parallelize(&inputs, common) {
         for result in run_parallel_by_input(&inputs, common, |input| {
             process_search_input(input, &query, output_fields, format, common)
@@ -764,6 +780,55 @@ struct SearchRenderedEvent {
     output: Option<String>,
 }
 
+struct SearchOutput {
+    writer: BufWriter<Stdout>,
+    records_written: usize,
+    error: Option<std::io::Error>,
+}
+
+impl SearchOutput {
+    fn stdout() -> Self {
+        Self {
+            writer: BufWriter::new(std::io::stdout()),
+            records_written: 0,
+            error: None,
+        }
+    }
+
+    fn write(&mut self, rendered: &str) {
+        if self.error.is_some() {
+            return;
+        }
+
+        if self.records_written > 0
+            && let Err(source) = writeln!(self.writer, "\n")
+        {
+            self.error = Some(source);
+            return;
+        }
+
+        if let Err(source) = write!(self.writer, "{rendered}") {
+            self.error = Some(source);
+            return;
+        }
+
+        self.records_written += 1;
+    }
+
+    fn finish(mut self) -> Result<Vec<String>, RunError> {
+        if let Some(source) = self.error {
+            return Err(RunError::StdoutWrite(source));
+        }
+
+        if self.records_written > 0 {
+            writeln!(self.writer).map_err(RunError::StdoutWrite)?;
+        }
+
+        self.writer.flush().map_err(RunError::StdoutWrite)?;
+        Ok(Vec::new())
+    }
+}
+
 fn process_search_input(
     input: &DiscoveredInput,
     query: &crate::query::SearchQuery,
@@ -818,7 +883,8 @@ pub fn run_dump(
     }
 
     let inputs = discover_inputs(discovery)?;
-    let mut output = DumpOutput::new(command)?;
+    let stream_stdout = command.output.is_none() && !should_parallelize(&inputs, common);
+    let mut output = DumpOutput::new(command, stream_stdout)?;
     let mut error_writer = ErrorWriter::new(command.errors.as_ref())?;
     let mut stats = DumpStats::default();
     let strict = common.strict || command.fail_fast;
@@ -1530,6 +1596,7 @@ fn render_correlation_json(
 struct DumpOutput {
     path: Option<String>,
     writer: Option<BufWriter<File>>,
+    stdout_writer: Option<BufWriter<Stdout>>,
     mode: DumpOutputMode,
     csv_header: Option<String>,
     records: Vec<String>,
@@ -1545,7 +1612,7 @@ enum DumpOutputMode {
 }
 
 impl DumpOutput {
-    fn new(command: &DumpArgs) -> Result<Self, RunError> {
+    fn new(command: &DumpArgs, stream_stdout: bool) -> Result<Self, RunError> {
         let mode = DumpOutputMode::from_command(command);
         let csv_header = matches!(mode, DumpOutputMode::Csv)
             .then(|| csv_record_from_values(command.fields.iter().map(String::as_str)));
@@ -1554,6 +1621,7 @@ impl DumpOutput {
             return Ok(Self {
                 path: None,
                 writer: None,
+                stdout_writer: stream_stdout.then(|| BufWriter::new(std::io::stdout())),
                 mode,
                 csv_header,
                 records: Vec::new(),
@@ -1570,6 +1638,7 @@ impl DumpOutput {
         Ok(Self {
             path: Some(path_label),
             writer: Some(BufWriter::new(file)),
+            stdout_writer: None,
             mode,
             csv_header,
             records: Vec::new(),
@@ -1583,8 +1652,8 @@ impl DumpOutput {
             return;
         }
 
-        match &mut self.writer {
-            Some(writer) => {
+        match (&mut self.writer, &mut self.stdout_writer) {
+            (Some(writer), _) => {
                 if matches!(self.mode, DumpOutputMode::Csv) && self.records_written == 0 {
                     let header = self
                         .csv_header
@@ -1604,7 +1673,27 @@ impl DumpOutput {
                     return;
                 }
             }
-            None => self.records.push(serialized),
+            (None, Some(writer)) => {
+                if matches!(self.mode, DumpOutputMode::Csv) && self.records_written == 0 {
+                    let header = self
+                        .csv_header
+                        .as_deref()
+                        .expect("CSV output should have a header");
+
+                    if let Err(source) = writeln!(writer, "{header}") {
+                        self.error = Some(source);
+                        return;
+                    }
+                }
+
+                if let Err(source) =
+                    write_dump_record(writer, self.mode, self.records_written, &serialized)
+                {
+                    self.error = Some(source);
+                    return;
+                }
+            }
+            (None, None) => self.records.push(serialized),
         }
 
         self.records_written += 1;
@@ -1612,6 +1701,31 @@ impl DumpOutput {
 
     fn finish(self) -> Result<Vec<String>, RunError> {
         if self.path.is_none() {
+            if let Some(source) = self.error {
+                return Err(RunError::DumpOutputWrite {
+                    path: "<stdout>".to_owned(),
+                    source,
+                });
+            }
+
+            if let Some(mut writer) = self.stdout_writer {
+                finish_dump_writer(
+                    &mut writer,
+                    self.mode,
+                    self.csv_header.as_deref(),
+                    self.records_written,
+                )
+                .map_err(|source| RunError::DumpOutputWrite {
+                    path: "<stdout>".to_owned(),
+                    source,
+                })?;
+                writer.flush().map_err(|source| RunError::DumpOutputWrite {
+                    path: "<stdout>".to_owned(),
+                    source,
+                })?;
+                return Ok(Vec::new());
+            }
+
             return Ok(render_dump_stdout(
                 self.mode,
                 self.csv_header.as_deref(),
@@ -1682,7 +1796,7 @@ fn serialize_dump_record(value: &serde_json::Value, mode: DumpOutputMode) -> Str
 }
 
 fn write_dump_record(
-    writer: &mut BufWriter<File>,
+    writer: &mut impl std::io::Write,
     mode: DumpOutputMode,
     records_written: usize,
     serialized: &str,
@@ -1711,7 +1825,7 @@ fn write_dump_record(
 }
 
 fn finish_dump_writer(
-    writer: &mut BufWriter<File>,
+    writer: &mut impl std::io::Write,
     mode: DumpOutputMode,
     csv_header: Option<&str>,
     records_written: usize,
