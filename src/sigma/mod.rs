@@ -77,6 +77,7 @@ enum CountOperator {
 pub struct SigmaLoadReport {
     pub rules: Vec<SigmaRule>,
     pub correlations: Vec<SigmaCorrelationRule>,
+    pub skipped_rules: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1015,10 +1016,27 @@ impl<'de> Deserialize<'de> for StringList {
 }
 
 pub fn load_sigma_rules(paths: &[PathBuf]) -> Result<SigmaLoadReport, SigmaLoadError> {
+    load_sigma_rules_with_mode(paths, SigmaLoadMode::Strict)
+}
+
+pub fn load_sigma_rules_non_strict(paths: &[PathBuf]) -> Result<SigmaLoadReport, SigmaLoadError> {
+    load_sigma_rules_with_mode(paths, SigmaLoadMode::SkipInvalidRules)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SigmaLoadMode {
+    Strict,
+    SkipInvalidRules,
+}
+
+fn load_sigma_rules_with_mode(
+    paths: &[PathBuf],
+    mode: SigmaLoadMode,
+) -> Result<SigmaLoadReport, SigmaLoadError> {
     let mut report = SigmaLoadReport::default();
 
     for path in paths {
-        load_path(path, &mut report)?;
+        load_path(path, &mut report, mode)?;
     }
 
     report
@@ -1030,10 +1048,20 @@ pub fn load_sigma_rules(paths: &[PathBuf]) -> Result<SigmaLoadReport, SigmaLoadE
     Ok(report)
 }
 
-fn load_path(path: &Path, report: &mut SigmaLoadReport) -> Result<(), SigmaLoadError> {
+fn load_path(
+    path: &Path,
+    report: &mut SigmaLoadReport,
+    mode: SigmaLoadMode,
+) -> Result<(), SigmaLoadError> {
     if path.is_file() {
         if is_yaml_path(path) {
-            load_file(path, report)?;
+            match load_file(path) {
+                Ok(file_report) => report.merge(file_report),
+                Err(error) if mode == SigmaLoadMode::SkipInvalidRules && error.is_rule_error() => {
+                    report.skipped_rules += 1;
+                }
+                Err(error) => return Err(error),
+            }
         }
 
         return Ok(());
@@ -1048,7 +1076,7 @@ fn load_path(path: &Path, report: &mut SigmaLoadReport) -> Result<(), SigmaLoadE
                 path: path.to_path_buf(),
                 source,
             })?;
-            load_path(&entry.path(), report)?;
+            load_path(&entry.path(), report, mode)?;
         }
 
         return Ok(());
@@ -1059,7 +1087,24 @@ fn load_path(path: &Path, report: &mut SigmaLoadReport) -> Result<(), SigmaLoadE
     })
 }
 
-fn load_file(path: &Path, report: &mut SigmaLoadReport) -> Result<(), SigmaLoadError> {
+impl SigmaLoadReport {
+    fn merge(&mut self, mut other: Self) {
+        self.rules.append(&mut other.rules);
+        self.correlations.append(&mut other.correlations);
+        self.skipped_rules += other.skipped_rules;
+    }
+}
+
+impl SigmaLoadError {
+    fn is_rule_error(&self) -> bool {
+        matches!(
+            self,
+            Self::RuleRead { .. } | Self::RuleParse { .. } | Self::UnsupportedRule { .. }
+        )
+    }
+}
+
+fn load_file(path: &Path) -> Result<SigmaLoadReport, SigmaLoadError> {
     let content = fs::read_to_string(path).map_err(|source| SigmaLoadError::RuleRead {
         path: path.to_path_buf(),
         source,
@@ -1070,11 +1115,13 @@ fn load_file(path: &Path, report: &mut SigmaLoadReport) -> Result<(), SigmaLoadE
         return Err(unsupported_rule(path, "rule file is empty"));
     }
 
+    let mut report = SigmaLoadReport::default();
+
     for document in documents {
-        load_document(path, document, report)?;
+        load_document(path, document, &mut report)?;
     }
 
-    Ok(())
+    Ok(report)
 }
 
 fn load_document(
@@ -3335,6 +3382,28 @@ correlation:
         assert!(
             matches!(malformed_error, SigmaLoadError::RuleParse { .. }),
             "malformed YAML should fail during YAML parsing, got {malformed_error:?}"
+        );
+    }
+
+    #[test]
+    fn non_strict_loader_skips_invalid_rule_files_and_continues() {
+        let path = PathBuf::from("tests/fixtures/sigma-syntax");
+        let report =
+            load_sigma_rules_non_strict(&[path]).expect("non-strict loading should skip bad rules");
+
+        assert_eq!(
+            report.rules.len(),
+            5,
+            "non-strict loading should keep valid base rules"
+        );
+        assert_eq!(
+            report.correlations.len(),
+            4,
+            "non-strict loading should keep valid correlation rules"
+        );
+        assert_eq!(
+            report.skipped_rules, 10,
+            "non-strict loading should count invalid YAML rule files"
         );
     }
 

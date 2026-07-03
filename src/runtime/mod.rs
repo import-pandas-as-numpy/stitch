@@ -22,7 +22,8 @@ use crate::output::{dump_json_value, render_event_payload, render_search_match};
 use crate::query::{QueryError, parse_search_query};
 use crate::sigma::{
     CorrelationRuntimeScope, SigmaCorrelationEngine, SigmaCorrelationMatch, SigmaCorrelationRule,
-    SigmaEventContext, SigmaLoadError, SigmaRule, load_sigma_rules, parse_sigma_duration,
+    SigmaEventContext, SigmaLoadError, SigmaRule, load_sigma_rules, load_sigma_rules_non_strict,
+    parse_sigma_duration,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -107,9 +108,13 @@ pub fn run_hunt(
     common: &CommonArgs,
 ) -> Result<CommandOutcome, RunError> {
     let inputs = discover_inputs(discovery)?;
-    let rules = load_sigma_rules(&command.rules)?;
+    let rules = if common.strict {
+        load_sigma_rules(&command.rules)?
+    } else {
+        load_sigma_rules_non_strict(&command.rules)?
+    };
     let correlation_rules = rules.correlations.len();
-    let skipped_correlation = 0usize;
+    let skipped_rules = rules.skipped_rules;
     let hunt_plan = build_hunt_plan(command, &rules.rules, &rules.correlations)?;
     let mut correlation_engine = build_correlation_engine(command, &rules.correlations)?;
     let HuntRunResult {
@@ -128,17 +133,17 @@ pub fn run_hunt(
     if common.stats {
         if correlation_rules == 0 {
             output.push(format!(
-                "stats: scanned={} matched={} rules={} skipped_correlation={} inputs={}",
+                "stats: scanned={} matched={} rules={} skipped_rules={} inputs={}",
                 scanned,
                 matched,
                 hunt_plan.alert_rule_count,
-                skipped_correlation,
+                skipped_rules,
                 inputs.len()
             ));
         } else {
             let correlation_stats = correlation_engine.stats();
             output.push(format!(
-                "stats: scanned={} matched={} correlation_matched={} rules={} correlation_rules={} correlation_state={} correlation_evicted={} skipped_correlation={} inputs={}",
+                "stats: scanned={} matched={} correlation_matched={} rules={} correlation_rules={} correlation_state={} correlation_evicted={} skipped_rules={} inputs={}",
                 scanned,
                 matched,
                 correlation_matched,
@@ -146,21 +151,25 @@ pub fn run_hunt(
                 correlation_rules,
                 correlation_stats.state_entries,
                 correlation_stats.evicted_state_entries,
-                skipped_correlation,
+                skipped_rules,
                 inputs.len()
             ));
         }
     }
 
-    let diagnostic = (command.summary && !common.quiet).then(|| {
-        format!(
+    let diagnostic = (!common.quiet && (command.summary || skipped_rules > 0)).then(|| {
+        let mut message = format!(
             "hunt loaded {} Sigma rule(s), loaded {} correlation rule(s), skipped {} rule(s), discovered {} EVTX input(s), matched {} event(s)",
             hunt_plan.alert_rule_count,
             correlation_rules,
-            skipped_correlation,
+            skipped_rules,
             inputs.len(),
             matched + correlation_matched
-        )
+        );
+        if skipped_rules > 0 && !command.summary {
+            message.insert_str(0, "warning: ");
+        }
+        message
     });
 
     Ok(CommandOutcome {
