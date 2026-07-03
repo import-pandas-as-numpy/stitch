@@ -343,7 +343,6 @@ mod tests {
             no_progress: false,
             quiet: false,
             strict: false,
-            timezone: None,
             from: None,
             to: None,
             include: Vec::new(),
