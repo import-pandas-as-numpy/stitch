@@ -68,6 +68,7 @@ fn parses_documented_stql_statements() {
         "channel in (\"Security\", \"System\")",
         "exists(field.name)",
         "event.id == 4624 | keep timestamp, event.id, computer, Event.EventData.TargetUserName",
+        "event.id in (4624, 4625) | summarize logon_types=make_set(Event.EventData.LogonType), users=make_set(Event.EventData.TargetUserName), count() by Event.EventData.IpAddress",
     ];
 
     for statement in statements {
@@ -483,6 +484,52 @@ fn parses_keep_pipeline_fields() {
     assert_eq!(
         query.keep_fields,
         vec!["timestamp", "event.id", "Event.EventData.TargetUserName"]
+    );
+}
+
+#[test]
+fn parses_summarize_pipeline() {
+    let query = parse_search_query(
+        "event.id in (4624, 4625) | summarize \
+         logon_types=make_set(Event.EventData.LogonType, 8), \
+         users=make_set(Event.EventData.TargetUserName), \
+         total=count() \
+         by source_ip=Event.EventData.IpAddress",
+    )
+    .expect("search query should parse");
+    let summarize = query.summarize.expect("query should include summarize");
+
+    assert_eq!(
+        summarize.group_by,
+        vec![GroupBy {
+            alias: "source_ip".to_owned(),
+            field: "Event.EventData.IpAddress".to_owned()
+        }],
+        "summarize should parse aliased group-by fields"
+    );
+    assert_eq!(
+        summarize.aggregates,
+        vec![
+            Aggregate {
+                alias: "logon_types".to_owned(),
+                function: AggregateFunction::MakeSet {
+                    field: "Event.EventData.LogonType".to_owned(),
+                    max_size: 8,
+                },
+            },
+            Aggregate {
+                alias: "users".to_owned(),
+                function: AggregateFunction::MakeSet {
+                    field: "Event.EventData.TargetUserName".to_owned(),
+                    max_size: DEFAULT_MAKE_SET_MAX_SIZE,
+                },
+            },
+            Aggregate {
+                alias: "total".to_owned(),
+                function: AggregateFunction::Count,
+            },
+        ],
+        "summarize should parse aggregate aliases, functions, fields, and max sizes"
     );
 }
 

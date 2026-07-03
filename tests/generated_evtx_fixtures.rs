@@ -716,8 +716,133 @@ fn generated_evtx_fixtures_are_searchable_by_normalized_fields() {
         "expected the Task Scheduler action-start fixture to match event.id 200, got:\n{stdout}"
     );
     assert!(
-        stdout.contains("stats: scanned=31 matched=10 parse_errors=0"),
+        stdout.contains("stats: scanned=39 matched=14 parse_errors=0"),
         "expected all generated fixture records to parse cleanly, got:\n{stdout}"
+    );
+}
+
+#[test]
+fn search_summarize_groups_logons_and_collects_distinct_values() {
+    let output = stitch()
+        .args([
+            "search",
+            "-i",
+            "tests/fixtures/evtx/aggregation-lateral-logons.evtx",
+            "--query",
+            "event.id in (4624, 4625) | summarize \
+             logon_types=make_set(Event.EventData.LogonType), \
+             users=make_set(Event.EventData.TargetUserName), \
+             target_hosts=make_set(computer), \
+             total=count() \
+             by source_ip=Event.EventData.IpAddress",
+            "--format",
+            "jsonl",
+            "--stats",
+        ])
+        .output()
+        .expect("stitch search summarize should run against generated fixtures");
+
+    assert!(
+        output.status.success(),
+        "stitch search summarize failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8(output.stdout).expect("summarize output should be valid UTF-8");
+
+    assert!(
+        stdout.contains(r#""source_ip":"198.51.100.77""#),
+        "expected lateral source IP group, got:\n{stdout}"
+    );
+    assert!(
+        stdout.contains(r#""users":["admin-review","alice.admin","bob.admin","svc-deploy"]"#),
+        "expected multiple distinct users to be collected into the lateral source IP group, got:\n{stdout}"
+    );
+    assert!(
+        stdout
+            .contains(r#""target_hosts":["LAB-DC-001","LAB-SRV-001","LAB-SRV-002","LAB-WKS-003"]"#),
+        "expected lateral source to touch several target hosts, got:\n{stdout}"
+    );
+    assert!(
+        stdout.contains(r#""logon_types":["10","3"]"#),
+        "expected mixed remote interactive and network logon types, got:\n{stdout}"
+    );
+    assert!(
+        stdout.contains(r#""total":5"#),
+        "expected repeated lateral source logons to increase count, got:\n{stdout}"
+    );
+    assert!(
+        stdout.contains(r#""source_ip":"203.0.113.44""#),
+        "expected noisy service-account source IP group, got:\n{stdout}"
+    );
+    assert!(
+        stdout.contains(r#""users":["svc-backup","svc-sql"]"#),
+        "expected repeated service-account attempts to collapse in make_set, got:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("stats: scanned=8 matched=8 parse_errors=0"),
+        "expected aggregation EVTX fixture to parse cleanly, got:\n{stdout}"
+    );
+}
+
+#[test]
+fn search_summarize_parallel_jobs_match_single_worker_with_timeout() {
+    let paths = repeated_paths_file(
+        &[
+            "tests/fixtures/evtx/security-auth.evtx",
+            "tests/fixtures/evtx/security-auth.evtx",
+        ],
+        8,
+    );
+    let query = "event.id in (4624, 4625) | summarize \
+         logon_types=make_set(Event.EventData.LogonType), \
+         users=make_set(Event.EventData.TargetUserName), \
+         total=count() \
+         by source_ip=Event.EventData.IpAddress";
+
+    let mut single = stitch();
+    single.args([
+        "-j",
+        "1",
+        "--paths-from",
+        paths.path().to_str().expect("temp path should be UTF-8"),
+        "search",
+        "--query",
+        query,
+        "--format",
+        "jsonl",
+    ]);
+    let single_output = run_with_timeout(single, Duration::from_secs(10));
+
+    assert!(
+        single_output.status.success(),
+        "single-worker summarize failed: {}",
+        String::from_utf8_lossy(&single_output.stderr)
+    );
+
+    let mut parallel = stitch();
+    parallel.args([
+        "-j",
+        "4",
+        "--paths-from",
+        paths.path().to_str().expect("temp path should be UTF-8"),
+        "search",
+        "--query",
+        query,
+        "--format",
+        "jsonl",
+    ]);
+    let parallel_output = run_with_timeout(parallel, Duration::from_secs(10));
+
+    assert!(
+        parallel_output.status.success(),
+        "parallel summarize failed: {}",
+        String::from_utf8_lossy(&parallel_output.stderr)
+    );
+    assert_eq!(
+        String::from_utf8(single_output.stdout).expect("single output should be UTF-8"),
+        String::from_utf8(parallel_output.stdout).expect("parallel output should be UTF-8"),
+        "parallel summarize should merge groups deterministically"
     );
 }
 

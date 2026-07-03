@@ -23,6 +23,10 @@ Fixture contents:
    synthetic workstation and server.
 7. `task-scheduler-operational.evtx`: scheduled task registration, update,
    action-start, and action-complete events.
+8. `aggregation-lateral-logons.evtx`: lateral logon aggregation coverage where
+   one source IP authenticates as several users across several target hosts,
+   while another source repeats failed attempts so `count()` and `make_set()`
+   behavior can be distinguished.
 
 The `correlation-evtx` directory contains EVTX files generated for correlation
 tests. `sysmon-correlation.evtx` includes repeated `ProcessGuid` activity for

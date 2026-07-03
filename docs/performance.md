@@ -16,7 +16,7 @@ processing.
 
 Current parallelized paths:
 
-1. `search` when `--limit` is not set.
+1. `search` when `--limit` is not set, including `| summarize` aggregation.
 2. `dump` for JSONL, JSON, and projected CSV.
 3. `hunt` only when correlation is disabled or no correlation rules are loaded.
 
@@ -24,7 +24,8 @@ Sequential paths by design:
 
 1. Single-file input, because current parallelism is file-level.
 2. Explicit `--jobs 1`.
-3. `search --limit`, because early termination affects scan counts and output.
+3. `search --limit`, because early termination affects scan counts, output, and
+   aggregation input.
 4. Correlation-enabled `hunt`, because correlation state is event-order and
    watermark sensitive.
 
@@ -80,3 +81,16 @@ enough to exercise output buffering and parser throughput. Compare baseline and
 branch commands with the same binary profile, dataset, output destination, and
 cache conditions. Record benchmark notes in the pull request or local benchmark
 report rather than publishing dated results in this public page.
+
+## Aggregation Memory Behavior
+
+`search | summarize` keeps one in-memory state row per distinct group key. It
+does not retain raw event payloads. `count()` stores only a counter per group.
+`make_set()` stores distinct stringified field values up to its optional
+`maxSize`; use a small explicit `maxSize` for high-cardinality fields such as
+process command lines, file paths, or remote IPs in broad searches.
+
+Parallel aggregation builds per-input partial group state and merges those
+states after file processing. This keeps worker ownership simple and avoids
+unbounded event queues, but peak memory is roughly the sum of live partial group
+states plus the final merged state.

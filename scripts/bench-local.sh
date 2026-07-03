@@ -36,6 +36,7 @@ cargo build "${CARGO_PROFILE_ARGS[@]}"
 : > "$PATH_LIST"
 for _ in $(seq 1 "$REPETITIONS"); do
   printf '%s\n' \
+    tests/fixtures/evtx/aggregation-lateral-logons.evtx \
     tests/fixtures/evtx/security-auth.evtx \
     tests/fixtures/evtx/sysmon-activity.evtx \
     tests/fixtures/evtx/wmi-activity.evtx \
@@ -103,6 +104,10 @@ for jobs in 1 4; do
   run_case "search metadata filter quiet" "$jobs" \
     "$BIN" -j "$jobs" --paths-from "$PATH_LIST" --quiet \
     search --query 'event.id >= 0' --format jsonl
+
+  run_case "search summarize quiet" "$jobs" \
+    "$BIN" -j "$jobs" --paths-from "$PATH_LIST" --quiet \
+    search --query 'event.id in (4624, 4625) | summarize logon_types=make_set(Event.EventData.LogonType, 16), users=make_set(Event.EventData.TargetUserName, 16), total=count() by source_ip=Event.EventData.IpAddress' --format jsonl
 
   run_case "hunt non-correlation quiet" "$jobs" \
     "$BIN" -j "$jobs" --paths-from "$PATH_LIST" --quiet \

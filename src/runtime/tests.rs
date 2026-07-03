@@ -53,6 +53,84 @@ fn cli_fields_override_keep_fields() {
 }
 
 #[test]
+fn summarize_fixture_exercises_lateral_logon_make_sets() {
+    let query = parse_search_query(
+        "event.id in (4624, 4625) | summarize \
+         users=make_set(Event.EventData.TargetUserName), \
+         limited_users=make_set(Event.EventData.TargetUserName, 2), \
+         logon_types=make_set(Event.EventData.LogonType), \
+         target_hosts=make_set(computer), \
+         total=count() \
+         by source_ip=Event.EventData.IpAddress",
+    )
+    .expect("aggregation fixture query should parse");
+    let summarize = query
+        .summarize
+        .as_ref()
+        .expect("query should include summarize");
+    let mut state = AggregateState::new(summarize);
+    let events = lateral_logon_fixture_events();
+
+    for event in &events {
+        assert!(
+            query.matches(event),
+            "aggregation fixture event should match query: {:?}",
+            event.raw
+        );
+        state.add_event(event, summarize);
+    }
+
+    let output = render_aggregate_rows(
+        &state.rows(summarize),
+        summarize,
+        OutputFormat::Jsonl,
+        DisplayStyle::Plain,
+    );
+
+    assert!(
+        output.contains(r#""source_ip":"198.51.100.77""#),
+        "expected lateral source IP group, got:\n{output}"
+    );
+    assert!(
+        output.contains(r#""users":["admin-review","alice.admin","bob.admin","svc-deploy"]"#),
+        "expected distinct user set for lateral source, got:\n{output}"
+    );
+    assert!(
+        output.contains(r#""limited_users":["alice.admin","bob.admin"]"#),
+        "expected make_set maxSize to cap the lateral source user set, got:\n{output}"
+    );
+    assert!(
+        output.contains(r#""logon_types":["10","3"]"#),
+        "expected lateral source to include remote interactive and network logons, got:\n{output}"
+    );
+    assert!(
+        output
+            .contains(r#""target_hosts":["LAB-DC-001","LAB-SRV-001","LAB-SRV-002","LAB-WKS-003"]"#),
+        "expected lateral source to touch several target hosts, got:\n{output}"
+    );
+    assert!(
+        output.contains(r#""total":5"#),
+        "expected duplicate alice.admin logon to increase count but not user set, got:\n{output}"
+    );
+    assert!(
+        output.contains(r#""source_ip":"203.0.113.44""#),
+        "expected noisy source IP group, got:\n{output}"
+    );
+    assert!(
+        output.contains(r#""users":["svc-backup","svc-sql"]"#),
+        "expected repeated svc-sql attempts to collapse in make_set, got:\n{output}"
+    );
+    assert!(
+        output.contains(r#""target_hosts":["LAB-SRV-003","LAB-SRV-004"]"#),
+        "expected noisy source target host set, got:\n{output}"
+    );
+    assert!(
+        output.contains(r#""total":3"#),
+        "expected noisy source count to retain repeated attempts, got:\n{output}"
+    );
+}
+
+#[test]
 fn hunt_rule_filters_apply_level_status_tag_min_level_and_excludes() {
     let mut high_rule = SigmaRule::test_rule("High PowerShell Rule", Some("high".to_owned()));
     high_rule.path = PathBuf::from("rules/high.yml");
@@ -530,5 +608,54 @@ fn hunt_test_event(channel: &str, event_id: u64) -> Event {
                 }
             }
         }),
+    )
+}
+
+fn lateral_logon_fixture_events() -> Vec<Event> {
+    include_str!("../../tests/fixtures/source/aggregation-lateral-logons.jsonl")
+        .lines()
+        .map(|line| {
+            let source = serde_json::from_str::<serde_json::Value>(line)
+                .expect("aggregation fixture source record should be valid JSON");
+            source_logon_record_to_event(&source)
+        })
+        .collect()
+}
+
+fn source_logon_record_to_event(source: &serde_json::Value) -> Event {
+    let record_id = source
+        .get("record_id")
+        .and_then(serde_json::Value::as_u64)
+        .expect("fixture source record should include record_id");
+    let raw = json!({
+        "Event": {
+            "System": {
+                "Provider": {
+                    "#attributes": {
+                        "Name": source["provider"].clone(),
+                        "Guid": source["provider_guid"].clone(),
+                    }
+                },
+                "EventID": source["event_id"].clone(),
+                "EventRecordID": source["record_id"].clone(),
+                "Channel": source["channel"].clone(),
+                "Computer": source["computer"].clone(),
+                "TimeCreated": {
+                    "#attributes": {
+                        "SystemTime": source["timestamp"].clone(),
+                    }
+                },
+            },
+            "EventData": source["event_data"].clone(),
+        }
+    });
+
+    Event::from_raw(
+        &DiscoveredInput::new(
+            PathBuf::from("aggregation-lateral-logons.evtx"),
+            PathBuf::from("tests/fixtures/source"),
+        ),
+        Some(record_id),
+        raw,
     )
 }
