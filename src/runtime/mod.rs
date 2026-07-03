@@ -132,17 +132,17 @@ pub fn run_hunt(
 
     if common.stats {
         if correlation_rules == 0 {
-            output.push(format!(
+            output.push(HuntRenderedOutput::Text(format!(
                 "stats: scanned={} matched={} rules={} skipped_rules={} inputs={}",
                 scanned,
                 matched,
                 hunt_plan.alert_rule_count,
                 skipped_rules,
                 inputs.len()
-            ));
+            )));
         } else {
             let correlation_stats = correlation_engine.stats();
-            output.push(format!(
+            output.push(HuntRenderedOutput::Text(format!(
                 "stats: scanned={} matched={} correlation_matched={} rules={} correlation_rules={} correlation_state={} correlation_evicted={} skipped_rules={} inputs={}",
                 scanned,
                 matched,
@@ -153,7 +153,7 @@ pub fn run_hunt(
                 correlation_stats.evicted_state_entries,
                 skipped_rules,
                 inputs.len()
-            ));
+            )));
         }
     }
 
@@ -171,6 +171,8 @@ pub fn run_hunt(
         }
         message
     });
+
+    let output = render_hunt_outputs(output);
 
     Ok(CommandOutcome {
         message: (!output.is_empty()).then(|| output.join("\n\n")),
@@ -195,10 +197,48 @@ fn run_parallel_by_input<T: Send>(
 
 #[derive(Debug, Default)]
 struct HuntRunResult {
-    output: Vec<String>,
+    output: Vec<HuntRenderedOutput>,
     scanned: usize,
     matched: usize,
     correlation_matched: usize,
+}
+
+#[derive(Debug)]
+enum HuntRenderedOutput {
+    Text(String),
+    PrettyMatch { full_output: bool, row: Vec<String> },
+}
+
+fn render_hunt_outputs(items: Vec<HuntRenderedOutput>) -> Vec<String> {
+    let mut output = Vec::new();
+    let mut pending_rows = Vec::new();
+    let mut pending_full_output = false;
+
+    for item in items {
+        match item {
+            HuntRenderedOutput::PrettyMatch { full_output, row } => {
+                if !pending_rows.is_empty() && pending_full_output != full_output {
+                    output.push(render_hunt_pretty_table(&pending_rows, pending_full_output));
+                    pending_rows.clear();
+                }
+                pending_full_output = full_output;
+                pending_rows.push(row);
+            }
+            HuntRenderedOutput::Text(text) => {
+                if !pending_rows.is_empty() {
+                    output.push(render_hunt_pretty_table(&pending_rows, pending_full_output));
+                    pending_rows.clear();
+                }
+                output.push(text);
+            }
+        }
+    }
+
+    if !pending_rows.is_empty() {
+        output.push(render_hunt_pretty_table(&pending_rows, pending_full_output));
+    }
+
+    output
 }
 
 fn run_hunt_inputs(
@@ -297,8 +337,12 @@ fn process_hunt_event_with_correlation(
             run.matched += 1;
 
             if !common.quiet {
-                run.output
-                    .push(render_hunt_match(rule, event, command.format, command.full));
+                run.output.push(render_hunt_output(
+                    rule,
+                    event,
+                    command.format,
+                    command.full,
+                ));
             }
         }
 
@@ -309,12 +353,13 @@ fn process_hunt_event_with_correlation(
                 run.correlation_matched += 1;
 
                 if !common.quiet {
-                    run.output.push(render_correlation_match(
-                        &correlation_match,
-                        command.format,
-                        command.correlation_event_limit,
-                        command.full,
-                    ));
+                    run.output
+                        .push(HuntRenderedOutput::Text(render_correlation_match(
+                            &correlation_match,
+                            command.format,
+                            command.correlation_event_limit,
+                            command.full,
+                        )));
                 }
             }
         }
@@ -329,7 +374,7 @@ fn should_parallelize(inputs: &[DiscoveredInput], common: &CommonArgs) -> bool {
 struct HuntInputResult {
     scanned: usize,
     matched: usize,
-    output: Vec<String>,
+    output: Vec<HuntRenderedOutput>,
 }
 
 fn process_hunt_input_without_correlation(
@@ -360,7 +405,7 @@ fn process_hunt_input_without_correlation(
                     result.matched += 1;
 
                     if !common.quiet {
-                        result.output.push(render_hunt_match(
+                        result.output.push(render_hunt_output(
                             rule,
                             &event,
                             command.format,
@@ -909,6 +954,7 @@ fn search_output_fields<'a>(command: &'a SearchArgs, keep_fields: &'a [String]) 
     }
 }
 
+#[cfg(test)]
 fn render_hunt_match(
     rule: &SigmaRule,
     event: &Event,
@@ -924,7 +970,35 @@ fn render_hunt_match(
     }
 }
 
+fn render_hunt_output(
+    rule: &SigmaRule,
+    event: &Event,
+    format: OutputFormat,
+    full_output: bool,
+) -> HuntRenderedOutput {
+    match format {
+        OutputFormat::Json | OutputFormat::Jsonl => {
+            HuntRenderedOutput::Text(render_hunt_json(rule, event, format))
+        }
+        OutputFormat::Pretty
+        | OutputFormat::Compact
+        | OutputFormat::Csv
+        | OutputFormat::Timeline => HuntRenderedOutput::PrettyMatch {
+            full_output,
+            row: render_hunt_pretty_row(rule, event, full_output),
+        },
+    }
+}
+
+#[cfg(test)]
 fn render_hunt_pretty(rule: &SigmaRule, event: &Event, full_output: bool) -> String {
+    render_hunt_pretty_table(
+        &[render_hunt_pretty_row(rule, event, full_output)],
+        full_output,
+    )
+}
+
+fn render_hunt_pretty_row(rule: &SigmaRule, event: &Event, full_output: bool) -> Vec<String> {
     let timestamp = event.metadata.timestamp.as_deref().unwrap_or("-");
     let level = rule.level.as_deref().unwrap_or("-");
     let channel = event.metadata.channel.as_deref().unwrap_or("-");
@@ -944,6 +1018,30 @@ fn render_hunt_pretty(rule: &SigmaRule, event: &Event, full_output: bool) -> Str
     let host = format_table_field(computer, full_output);
 
     if full_output {
+        return vec![
+            timestamp.to_owned(),
+            rule_title,
+            event_label,
+            level.to_owned(),
+            format_table_field(channel, full_output),
+            host,
+            format_table_field(&event.source.file_path.display().to_string(), full_output),
+            payload,
+        ];
+    }
+
+    vec![
+        timestamp.to_owned(),
+        rule_title,
+        event_label,
+        level.to_owned(),
+        host,
+        payload,
+    ]
+}
+
+fn render_hunt_pretty_table(rows: &[Vec<String>], full_output: bool) -> String {
+    if full_output {
         return render_table(
             &[
                 TableColumn::new("Timestamp", 29),
@@ -955,16 +1053,7 @@ fn render_hunt_pretty(rule: &SigmaRule, event: &Event, full_output: bool) -> Str
                 TableColumn::new("File", 42),
                 TableColumn::new("Payload", 80),
             ],
-            &[vec![
-                timestamp.to_owned(),
-                rule_title,
-                event_label,
-                level.to_owned(),
-                format_table_field(channel, full_output),
-                host,
-                format_table_field(&event.source.file_path.display().to_string(), full_output),
-                payload,
-            ]],
+            rows,
         );
     }
 
@@ -977,14 +1066,7 @@ fn render_hunt_pretty(rule: &SigmaRule, event: &Event, full_output: bool) -> Str
             TableColumn::new("Host", 20),
             TableColumn::new("Payload", 42),
         ],
-        &[vec![
-            timestamp.to_owned(),
-            rule_title,
-            event_label,
-            level.to_owned(),
-            host,
-            payload,
-        ]],
+        rows,
     )
 }
 
