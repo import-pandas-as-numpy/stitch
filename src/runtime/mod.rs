@@ -462,7 +462,9 @@ fn build_correlation_engine(
 struct HuntPlan<'a> {
     rules: Vec<PlannedRule<'a>>,
     general_rule_indices: Vec<usize>,
+    channel_rule_indices: HashMap<String, Vec<usize>>,
     event_id_rule_indices: HashMap<u64, Vec<usize>>,
+    channel_event_id_rule_indices: HashMap<(String, u64), Vec<usize>>,
     alert_rule_count: usize,
 }
 
@@ -500,34 +502,65 @@ fn build_hunt_plan<'a>(
             })
         })
         .collect();
-    let (general_rule_indices, event_id_rule_indices) = index_planned_rules(&planned);
+    let rule_indices = index_planned_rules(&planned);
 
     Ok(HuntPlan {
         rules: planned,
-        general_rule_indices,
-        event_id_rule_indices,
+        general_rule_indices: rule_indices.general,
+        channel_rule_indices: rule_indices.channel,
+        event_id_rule_indices: rule_indices.event_id,
+        channel_event_id_rule_indices: rule_indices.channel_event_id,
         alert_rule_count,
     })
 }
 
-fn index_planned_rules(planned: &[PlannedRule<'_>]) -> (Vec<usize>, HashMap<u64, Vec<usize>>) {
-    let mut general_rule_indices = Vec::new();
-    let mut event_id_rule_indices: HashMap<u64, Vec<usize>> = HashMap::new();
+#[derive(Debug, Default)]
+struct HuntRuleIndex {
+    general: Vec<usize>,
+    channel: HashMap<String, Vec<usize>>,
+    event_id: HashMap<u64, Vec<usize>>,
+    channel_event_id: HashMap<(String, u64), Vec<usize>>,
+}
 
-    for (index, planned_rule) in planned.iter().enumerate() {
-        if let Some(event_ids) = planned_rule.rule.required_event_ids() {
-            for event_id in event_ids {
-                event_id_rule_indices
-                    .entry(event_id)
-                    .or_default()
-                    .push(index);
+fn index_planned_rules(planned: &[PlannedRule<'_>]) -> HuntRuleIndex {
+    let mut index = HuntRuleIndex::default();
+
+    for (rule_index, planned_rule) in planned.iter().enumerate() {
+        match (
+            planned_rule.rule.required_channels(),
+            planned_rule.rule.required_event_ids(),
+        ) {
+            (Some(channels), Some(event_ids)) => {
+                for channel in channels {
+                    let channel = normalize_hunt_index_channel(&channel);
+                    for event_id in &event_ids {
+                        index
+                            .channel_event_id
+                            .entry((channel.clone(), *event_id))
+                            .or_default()
+                            .push(rule_index);
+                    }
+                }
             }
-        } else {
-            general_rule_indices.push(index);
+            (Some(channels), None) => {
+                for channel in channels {
+                    index
+                        .channel
+                        .entry(normalize_hunt_index_channel(&channel))
+                        .or_default()
+                        .push(rule_index);
+                }
+            }
+            (None, Some(event_ids)) => {
+                for event_id in event_ids {
+                    index.event_id.entry(event_id).or_default().push(rule_index);
+                }
+            }
+            (None, None) => index.general.push(rule_index),
         }
     }
 
-    (general_rule_indices, event_id_rule_indices)
+    index
 }
 
 fn for_each_candidate_rule<'a>(
@@ -539,6 +572,20 @@ fn for_each_candidate_rule<'a>(
         visit(&hunt_plan.rules[*index]);
     }
 
+    let channel = event
+        .metadata
+        .channel
+        .as_deref()
+        .map(normalize_hunt_index_channel);
+
+    if let Some(channel) = channel.as_deref()
+        && let Some(indices) = hunt_plan.channel_rule_indices.get(channel)
+    {
+        for index in indices {
+            visit(&hunt_plan.rules[*index]);
+        }
+    }
+
     if let Some(event_id) = event.metadata.event_id
         && let Some(indices) = hunt_plan.event_id_rule_indices.get(&event_id)
     {
@@ -546,6 +593,20 @@ fn for_each_candidate_rule<'a>(
             visit(&hunt_plan.rules[*index]);
         }
     }
+
+    if let (Some(channel), Some(event_id)) = (channel.as_deref(), event.metadata.event_id)
+        && let Some(indices) = hunt_plan
+            .channel_event_id_rule_indices
+            .get(&(channel.to_owned(), event_id))
+    {
+        for index in indices {
+            visit(&hunt_plan.rules[*index]);
+        }
+    }
+}
+
+fn normalize_hunt_index_channel(channel: &str) -> String {
+    channel.to_ascii_lowercase()
 }
 
 fn filter_hunt_rules<'a>(
@@ -2239,6 +2300,8 @@ mod tests {
     fn hunt_plan_indexes_rules_by_required_event_id() {
         let fixture = tempfile::tempdir().expect("tempdir should be created");
         let event_rule = fixture.path().join("event-id.yml");
+        let channel_rule = fixture.path().join("channel.yml");
+        let channel_event_rule = fixture.path().join("channel-event-id.yml");
         let general_rule = fixture.path().join("general.yml");
         fs::write(
             &event_rule,
@@ -2251,6 +2314,34 @@ detection:
 ",
         )
         .expect("event rule should be written");
+        fs::write(
+            &channel_rule,
+            r"
+title: Channel Rule
+logsource:
+  product: windows
+  service: powershell
+detection:
+  selection:
+    Event.EventData.ScriptBlockText|contains: admin
+  condition: selection
+",
+        )
+        .expect("channel rule should be written");
+        fs::write(
+            &channel_event_rule,
+            r"
+title: Channel And Event ID Rule
+logsource:
+  product: windows
+  service: security
+detection:
+  selection:
+    EventID: 4624
+  condition: selection
+",
+        )
+        .expect("channel and event rule should be written");
         fs::write(
             &general_rule,
             r"
@@ -2267,16 +2358,92 @@ detection:
 
         let plan = build_hunt_plan(&command, &report.rules, &[]).expect("hunt plan should build");
 
-        assert_eq!(plan.rules.len(), 2);
+        assert_eq!(plan.rules.len(), 4);
         assert_eq!(
             plan.event_id_rule_indices.get(&4625).map(Vec::len),
             Some(1),
             "event-id rule should be indexed by required EventID"
         );
         assert_eq!(
+            plan.channel_rule_indices
+                .get("microsoft-windows-powershell/operational")
+                .map(Vec::len),
+            Some(1),
+            "channel-only rule should be indexed by normalized channel"
+        );
+        assert_eq!(
+            plan.channel_event_id_rule_indices
+                .get(&("security".to_owned(), 4624))
+                .map(Vec::len),
+            Some(1),
+            "rule with channel and EventID constraints should use the combined index"
+        );
+        assert_eq!(
             plan.general_rule_indices.len(),
             1,
-            "rule without required EventID should remain in the general bucket"
+            "rule without required channel or EventID should remain in the general bucket"
+        );
+    }
+
+    #[test]
+    fn hunt_plan_visits_only_matching_metadata_candidate_buckets() {
+        let fixture = tempfile::tempdir().expect("tempdir should be created");
+        let security_rule = fixture.path().join("security.yml");
+        let sysmon_rule = fixture.path().join("sysmon.yml");
+        let general_rule = fixture.path().join("general.yml");
+        fs::write(
+            &security_rule,
+            r"
+title: Security Logon Rule
+logsource:
+  product: windows
+  service: security
+detection:
+  selection:
+    EventID: 4624
+  condition: selection
+",
+        )
+        .expect("security rule should be written");
+        fs::write(
+            &sysmon_rule,
+            r"
+title: Sysmon Rule
+logsource:
+  product: windows
+  service: sysmon
+detection:
+  selection:
+    EventID: 1
+  condition: selection
+",
+        )
+        .expect("sysmon rule should be written");
+        fs::write(
+            &general_rule,
+            r"
+title: General Rule
+detection:
+  selection:
+    Event.EventData.TargetUserName|contains: admin
+  condition: selection
+",
+        )
+        .expect("general rule should be written");
+        let report = load_sigma_rules(&[fixture.path().to_path_buf()]).expect("rules should load");
+        let command = hunt_args();
+        let plan = build_hunt_plan(&command, &report.rules, &[]).expect("hunt plan should build");
+        let event = hunt_test_event("Security", 4624);
+        let mut visited = Vec::new();
+
+        for_each_candidate_rule(&plan, &event, |planned_rule| {
+            visited.push(planned_rule.rule.title.as_str());
+        });
+
+        assert_eq!(
+            visited,
+            ["General Rule", "Security Logon Rule"],
+            "candidate loop should skip rules from other channel/EventID buckets"
         );
     }
 
@@ -2509,5 +2676,21 @@ detection:
             min_level: None,
             summary: false,
         }
+    }
+
+    fn hunt_test_event(channel: &str, event_id: u64) -> Event {
+        Event::from_raw(
+            &DiscoveredInput::new(PathBuf::from("test.evtx"), PathBuf::from(".")),
+            Some(1),
+            json!({
+                "Event": {
+                    "System": {
+                        "EventID": event_id,
+                        "Channel": channel,
+                        "Computer": "WIN-01"
+                    }
+                }
+            }),
+        )
     }
 }
