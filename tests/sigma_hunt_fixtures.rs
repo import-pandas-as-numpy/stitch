@@ -669,3 +669,39 @@ fn hunt_strict_mode_rejects_invalid_rule_files() {
         "strict hunt should report the invalid rule load error, got:\n{stderr}"
     );
 }
+
+#[test]
+fn hunt_pretty_output_groups_matches_into_one_table() {
+    let paths = repeated_paths_file(&["tests/fixtures/evtx/sysmon-activity.evtx"], 3);
+    let output = stitch()
+        .args([
+            "--paths-from",
+            paths.path().to_str().expect("temp path should be UTF-8"),
+            "hunt",
+            "--rules",
+            "tests/fixtures/sigma/sysmon_powershell_network.yml",
+            "--no-progress",
+        ])
+        .output()
+        .expect("stitch hunt should run grouped pretty output case");
+
+    assert!(
+        output.status.success(),
+        "stitch hunt failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8(output.stdout)
+        .expect("stitch hunt output should be valid UTF-8 for pretty results");
+    let header_count = stdout.matches("│ Timestamp").count();
+    let match_count = stdout.matches("│ 2026-01-15T10:06:02.000000Z").count();
+
+    assert_eq!(
+        header_count, 1,
+        "pretty hunt output should render one table header for grouped matches, got:\n{stdout}"
+    );
+    assert_eq!(
+        match_count, 3,
+        "pretty hunt output should still render one row per match, got:\n{stdout}"
+    );
+}
