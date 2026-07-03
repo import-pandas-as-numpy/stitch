@@ -77,6 +77,7 @@ fn defaults_to_current_directory_when_no_roots_are_provided() {
         include: Vec::new(),
         exclude: Vec::new(),
         stats: false,
+        no_color: false,
     };
 
     let config = DiscoveryConfig::try_from(&common).expect("default discovery should build");

@@ -5,14 +5,46 @@ use serde_json::{Value, json};
 use crate::cli::OutputFormat;
 use crate::event::{Event, FieldValue};
 
-pub fn render_search_match(event: &Event, fields: &[String], format: OutputFormat) -> String {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DisplayStyle {
+    Plain,
+    Color,
+}
+
+impl DisplayStyle {
+    #[must_use]
+    pub const fn colored(self) -> bool {
+        matches!(self, Self::Color)
+    }
+}
+
+pub fn render_search_match(
+    event: &Event,
+    fields: &[String],
+    format: OutputFormat,
+    style: DisplayStyle,
+) -> String {
     match format {
         OutputFormat::Json => render_json(event, fields, JsonMode::Pretty),
         OutputFormat::Jsonl => render_json(event, fields, JsonMode::Compact),
         OutputFormat::Pretty
         | OutputFormat::Compact
         | OutputFormat::Csv
-        | OutputFormat::Timeline => render_pretty(event, fields),
+        | OutputFormat::Timeline => render_pretty(event, fields, style),
+    }
+}
+
+#[must_use]
+pub fn search_match_delimiter(format: OutputFormat, style: DisplayStyle) -> String {
+    if matches!(format, OutputFormat::Pretty) {
+        styled(
+            "------------------------------------------------------------------------",
+            "2",
+            style,
+        )
+        .into_owned()
+    } else {
+        String::new()
     }
 }
 
@@ -52,7 +84,7 @@ pub fn dump_json_value(event: &Event, fields: &[String], raw: bool) -> serde_jso
     })
 }
 
-fn render_pretty(event: &Event, fields: &[String]) -> String {
+fn render_pretty(event: &Event, fields: &[String], style: DisplayStyle) -> String {
     let timestamp = event.metadata.timestamp.as_deref().unwrap_or("-");
     let channel = event.metadata.channel.as_deref().unwrap_or("-");
     let event_id = event
@@ -65,9 +97,14 @@ fn render_pretty(event: &Event, fields: &[String]) -> String {
         .record_id
         .map_or_else(|| "-".to_owned(), |value| value.to_string());
     let file_path = event.source.file_path.display();
+    let timestamp = styled(timestamp, "36", style);
+    let channel = styled(channel, "36", style);
+    let event_id = styled(&event_id, "33", style);
+    let file_label = styled("file", "2", style);
+    let record_label = styled("record", "2", style);
 
     let mut output = format!(
-        "{timestamp:<26}  {channel:<36}  {event_id:<6}  {computer}\n  file: {file_path}  record: {record_id}"
+        "{timestamp:<26}  {channel:<36}  {event_id:<6}  {computer}\n  {file_label}: {file_path}  {record_label}: {record_id}"
     );
 
     if fields.is_empty() {
@@ -81,10 +118,20 @@ fn render_pretty(event: &Event, fields: &[String]) -> String {
             .field(field)
             .and_then(FieldValue::as_text)
             .unwrap_or_else(|| "-".to_owned());
+        let field = styled(field, "2;36", style);
+        let value = styled(&value, "1", style);
         let _ = write!(output, "\n  {field}: {value}");
     }
 
     output
+}
+
+fn styled<'a>(text: &'a str, code: &str, style: DisplayStyle) -> std::borrow::Cow<'a, str> {
+    if style.colored() {
+        std::borrow::Cow::Owned(format!("\x1b[{code}m{text}\x1b[0m"))
+    } else {
+        std::borrow::Cow::Borrowed(text)
+    }
 }
 
 #[derive(Debug, Clone, Copy)]

@@ -25,6 +25,10 @@ Supported formats:
 | `json` | Pretty JSON object per match, separated by blank lines. |
 | `jsonl` | One compact JSON object per matching event. |
 
+Pretty search output uses a visible delimiter between matches. When stdout is a
+terminal, pretty output also uses subtle ANSI color to distinguish metadata,
+field names, and field values. Use global `--no-color` to suppress ANSI color.
+
 Search output always includes normalized metadata and source identity:
 
 ```text
