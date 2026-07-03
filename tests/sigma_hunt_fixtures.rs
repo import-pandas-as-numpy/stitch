@@ -111,7 +111,7 @@ fn hunt_matches_generated_evtx_with_windows_sigma_field_aliases() {
         "expected Defender event identity in hunt output, got:\n{stdout}"
     );
     assert!(
-        stdout.contains("stats: scanned=31 matched=4 rules=4 skipped_correlation=0 inputs=7"),
+        stdout.contains("stats: scanned=31 matched=4 rules=4 skipped_rules=0 inputs=7"),
         "expected generated hunt stats to stay stable, got:\n{stdout}"
     );
 }
@@ -217,7 +217,7 @@ fn hunt_cli_filters_generated_sigma_rules() {
         "medium WMI rule should be filtered by --min-level high, got:\n{stdout}"
     );
     assert!(
-        stdout.contains("stats: scanned=31 matched=2 rules=2 skipped_correlation=0 inputs=7"),
+        stdout.contains("stats: scanned=31 matched=2 rules=2 skipped_rules=0 inputs=7"),
         "expected filtered hunt stats, got:\n{stdout}"
     );
 }
@@ -258,7 +258,7 @@ fn hunt_cli_excludes_generated_sigma_rules_by_title_glob() {
         "non-excluded Sysmon rule should still match, got:\n{stdout}"
     );
     assert!(
-        stdout.contains("stats: scanned=31 matched=3 rules=3 skipped_correlation=0 inputs=7"),
+        stdout.contains("stats: scanned=31 matched=3 rules=3 skipped_rules=0 inputs=7"),
         "expected exclude-rule hunt stats, got:\n{stdout}"
     );
 }
@@ -301,7 +301,7 @@ fn hunt_matches_generated_evtx_with_broader_sigma_grammar() {
         "expected null/condition-list Sigma grammar rule to match, got:\n{stdout}"
     );
     assert!(
-        stdout.contains("stats: scanned=31 matched=4 rules=3 skipped_correlation=0 inputs=7"),
+        stdout.contains("stats: scanned=31 matched=4 rules=3 skipped_rules=0 inputs=7"),
         "expected broader grammar hunt stats, got:\n{stdout}"
     );
 }
@@ -353,7 +353,7 @@ fn hunt_emits_event_count_correlation_matches_from_generated_evtx() {
     );
     assert!(
         stdout.contains(
-            "stats: scanned=4 matched=8 correlation_matched=3 rules=4 correlation_rules=3 correlation_state=6 correlation_evicted=0 skipped_correlation=0 inputs=1"
+            "stats: scanned=4 matched=8 correlation_matched=3 rules=4 correlation_rules=3 correlation_state=6 correlation_evicted=0 skipped_rules=0 inputs=1"
         ),
         "expected correlation stats, got:\n{stdout}"
     );
@@ -604,5 +604,68 @@ fn hunt_summary_with_matches_is_written_to_stderr() {
             && stderr.contains("discovered 3 EVTX input(s)")
             && stderr.contains("matched 3 event(s)"),
         "expected hunt summary on stderr, got:\n{stderr}"
+    );
+}
+
+#[test]
+fn hunt_skips_invalid_rule_files_in_non_strict_mode() {
+    let output = stitch()
+        .args([
+            "hunt",
+            "-i",
+            "tests/fixtures/evtx/security-auth.evtx",
+            "--rules",
+            "tests/fixtures/sigma-syntax",
+            "--format",
+            "jsonl",
+            "--no-progress",
+            "--summary",
+        ])
+        .output()
+        .expect("stitch hunt should run with mixed valid and invalid rules");
+
+    assert!(
+        output.status.success(),
+        "non-strict hunt should skip invalid rules and continue:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stderr = String::from_utf8(output.stderr).expect("summary should be valid UTF-8");
+
+    assert!(
+        stderr.contains("hunt loaded 5 Sigma rule(s)")
+            && stderr.contains("loaded 4 correlation rule(s)")
+            && stderr.contains("skipped 10 rule(s)"),
+        "expected mixed rule load summary with skipped count, got:\n{stderr}"
+    );
+}
+
+#[test]
+fn hunt_strict_mode_rejects_invalid_rule_files() {
+    let output = stitch()
+        .args([
+            "hunt",
+            "-i",
+            "tests/fixtures/evtx/security-auth.evtx",
+            "--rules",
+            "tests/fixtures/sigma-syntax",
+            "--format",
+            "jsonl",
+            "--no-progress",
+            "--strict",
+        ])
+        .output()
+        .expect("stitch hunt should report strict rule loading failure");
+
+    assert!(
+        !output.status.success(),
+        "strict hunt should reject invalid rules"
+    );
+
+    let stderr = String::from_utf8(output.stderr).expect("stderr should be valid UTF-8");
+
+    assert!(
+        stderr.contains("unsupported Sigma rule") || stderr.contains("failed to parse Sigma rule"),
+        "strict hunt should report the invalid rule load error, got:\n{stderr}"
     );
 }
