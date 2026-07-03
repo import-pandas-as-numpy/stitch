@@ -145,7 +145,7 @@ function renderLayout(page, rendered) {
   </header>
   <div class="shell">
     <aside class="sidebar" aria-label="Documentation navigation">
-      ${renderSidebar(page)}
+      ${renderSidebar(page, rendered.toc)}
     </aside>
     <main class="doc">
       <div class="page-kicker">${escapeHtml(page.group)}</div>
@@ -163,7 +163,7 @@ function renderLayout(page, rendered) {
 `;
 }
 
-function renderSidebar(currentPage) {
+function renderSidebar(currentPage, currentToc) {
   const groups = [];
   for (const page of pages) {
     let group = groups.find((candidate) => candidate.name === page.group);
@@ -178,16 +178,29 @@ function renderSidebar(currentPage) {
     .map(
       (group) => `<section class="nav-group">
   <h2>${escapeHtml(group.name)}</h2>
-  ${group.pages.map((page) => renderSidebarLink(page, currentPage)).join("\n  ")}
+  ${group.pages.map((page) => renderSidebarLink(page, currentPage, currentToc)).join("\n  ")}
 </section>`,
     )
     .join("\n");
 }
 
-function renderSidebarLink(page, currentPage) {
+function renderSidebarLink(page, currentPage, currentToc) {
   const href = page.slug ? `/${page.slug}/` : "/";
-  const active = page.slug === currentPage.slug ? ' aria-current="page"' : "";
-  return `<a href="${href}"${active}><span>${escapeHtml(page.nav)}</span><small>${escapeHtml(page.description)}</small></a>`;
+  const isCurrent = page.slug === currentPage.slug;
+  const active = isCurrent ? ' aria-current="page"' : "";
+  const sectionLinks = isCurrent ? renderSidebarSections(currentToc) : "";
+  return `<div class="nav-item"><a href="${href}"${active}><span>${escapeHtml(page.nav)}</span><small>${escapeHtml(page.description)}</small></a>${sectionLinks}</div>`;
+}
+
+function renderSidebarSections(toc) {
+  const sections = toc.filter((item) => item.level === 2);
+  if (sections.length === 0) {
+    return "";
+  }
+
+  return `<ol class="nav-sections">
+${sections.map((item) => `<li><a href="#${item.id}">${escapeHtml(item.text)}</a></li>`).join("\n")}
+</ol>`;
 }
 
 function renderToc(toc) {

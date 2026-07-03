@@ -1,58 +1,112 @@
 # Stitch Query Language
 
-`stql` is the query language used by `stitch search`.
+STQL is the filter language used by `stitch search`. It is designed for fast
+event filtering over normalized Windows Event Log metadata and raw EVTX fields.
 
-The language is intentionally small at this stage. Its purpose is fast event filtering with readable syntax, not full aggregation or SIEM query compatibility.
+STQL is not an aggregation language. The only supported pipeline command today
+is `keep`, which projects fields in search output.
 
-## Current Support
-
-### Boolean Logic
+## Query Shape
 
 ```text
-event.id == 4625 and channel == "Security"
-event.id == 4625 or event.id == 4624
-not exists(Event.EventData.TargetUserName)
+<filter expression>
+<filter expression> | keep <field>, <field>, ...
 ```
 
-Precedence:
+Examples:
+
+```text
+event.id == 4625
+event.id == 4624 and channel == "Security"
+Event.EventData.CommandLine contains_ci "powershell"
+provider =~ /powershell/i | keep timestamp, event.id, computer
+```
+
+## Fields
+
+Field lookup checks normalized aliases first, then falls back to dot paths in
+the parsed EVTX JSON.
+
+Normalized aliases:
+
+| Alias | Meaning |
+| --- | --- |
+| `timestamp`, `event.timestamp`, `winlog.timestamp` | Event timestamp. |
+| `record_id`, `event.record_id` | Event record ID. |
+| `channel`, `event.channel`, `winlog.channel` | Event log channel. |
+| `provider`, `event.provider`, `winlog.provider_name` | Event provider name. |
+| `event.id`, `event_id`, `winlog.event_id` | Event ID. |
+| `computer`, `host`, `host.name`, `source.computer` | Computer name. |
+| `source.file_path` | EVTX file path. |
+| `source.collection_root` | Discovery root that produced the input. |
+
+Raw EVTX paths use dot notation:
+
+```text
+Event.System.EventID
+Event.System.Channel
+Event.EventData.TargetUserName
+Event.System.TimeCreated.#attributes.SystemTime
+```
+
+Field names may contain ASCII letters, numbers, `_`, `.`, `-`, and `#`. They
+must start with an ASCII letter or `_`.
+
+## Literals
+
+| Literal | Examples | Notes |
+| --- | --- | --- |
+| String | `"Security"`, `"alice.admin"` | Double-quoted. Backslash escapes preserve the escaped character. |
+| Number | `4624`, `1000` | Unsigned integer values only. |
+| Boolean | `true`, `false` | Case-insensitive keyword parsing. |
+| List | `(4624, 4625)`, `("Security", "System")` | Used only with `in`. |
+| Regex | `/(?i)powershell/`, `/powershell/i` | Used only with `=~` and `!~`. |
+
+## Boolean Operators
+
+| Operator | Meaning |
+| --- | --- |
+| `and` | Both sides must match. |
+| `or` | Either side may match. |
+| `not` | Negates the following expression. |
+| `(...)` | Groups expressions. |
+
+Precedence, from strongest to weakest:
 
 1. Parentheses
 2. `not`
 3. `and`
 4. `or`
 
-Parentheses may be nested to any practical depth supported by the process stack.
-Operators at the same precedence level are evaluated left to right. For example,
-`event.id == 123 or event.id == 456 and user.name == "alice.admin"` is evaluated
-as `event.id == 123 or (event.id == 456 and user.name == "alice.admin")`.
-
-`stitch search` plans safe metadata prefilters for globally required `and`
-predicates on normalized fields such as `timestamp`, `event.id`, `channel`,
-`provider`, and `computer`. `or` and `not` branches are not extracted into
-prefilters because doing so could change query semantics.
-
-For memory-constrained searches, use `--jobs 1` when large pretty/JSON output is
-expected. Parallel search buffers each input's rendered matches before merging
-results in discovery order; `--limit` also runs sequentially so early
-termination remains predictable.
-
-### Comparisons
-
-Supported operators:
+Operators at the same precedence level are evaluated left to right. This query:
 
 ```text
-==
-!=
-<
-<=
->
->=
-contains
-contains_ci
-in
-=~
-!~
+event.id == 123 or event.id == 456 and user.name == "alice.admin"
 ```
+
+is evaluated as:
+
+```text
+event.id == 123 or (event.id == 456 and user.name == "alice.admin")
+```
+
+Keywords are case-insensitive.
+
+## Comparison Operators
+
+| Operator | Meaning | Literal types |
+| --- | --- | --- |
+| `==` | Equal. | String, number, boolean. |
+| `!=` | Not equal. | String, number, boolean. |
+| `<` | Less than. | String, number, timestamp string. |
+| `<=` | Less than or equal. | String, number, timestamp string. |
+| `>` | Greater than. | String, number, timestamp string. |
+| `>=` | Greater than or equal. | String, number, timestamp string. |
+| `contains` | Case-sensitive substring match. | String only. |
+| `contains_ci` | Case-insensitive substring match. | String only. |
+| `in` | Field equals one value in a list. | List of strings, numbers, or booleans. |
+| `=~` | Regex matches field text. | Quoted regex string or slash regex literal. |
+| `!~` | Regex does not match field text. | Quoted regex string or slash regex literal. |
 
 Examples:
 
@@ -62,97 +116,140 @@ record_id > 1000
 Event.EventData.TargetUserName contains "admin"
 Event.EventData.CommandLine contains_ci "powershell"
 event.id in (4624, 4625)
-provider =~ "(?i)powershell"
-provider !~ "(?i)defender"
-timestamp >= "2026-06-27T00:00:00Z"
+channel in ("Security", "System")
+Event.EventData.Enabled == true
 ```
 
-Numeric comparisons require a numeric literal. String values that contain digits can be compared to numeric literals when they parse cleanly.
+Number comparisons require a numeric literal. Field values stored as strings can
+match numeric comparisons when they parse cleanly as unsigned integers.
 
-Timestamp comparisons parse RFC3339 timestamps when the field is a normalized timestamp field such as `timestamp`, `event.timestamp`, or `winlog.timestamp`.
+String comparisons are lexicographic except for timestamp fields described
+below.
 
-Examples:
+## Timestamp Comparisons
+
+Timestamp comparison is enabled for normalized timestamp fields and raw
+`TimeCreated.SystemTime` paths:
 
 ```text
-timestamp >= "2026-03-21T06:00:00Z" and timestamp < "2026-03-21T07:00:00Z"
+timestamp
+event.timestamp
+winlog.timestamp
+*.TimeCreated.SystemTime
+*.TimeCreated.#attributes.SystemTime
+```
+
+Timestamp literals are strings parsed as RFC 3339:
+
+```text
+timestamp >= "2026-03-21T06:00:00Z"
 timestamp >= "2026-03-21T01:00:00-05:00"
 timestamp >= "2026-03-21T06:00:00"
 ```
 
-Offset-less timestamp values default to UTC. For example, `"2026-03-21T06:00:00"` is interpreted as `"2026-03-21T06:00:00Z"`.
+Offset-less timestamp literals are interpreted as UTC. For example,
+`"2026-03-21T06:00:00"` is treated as `"2026-03-21T06:00:00Z"`.
 
-Other string fields use lexicographic comparison.
+## Regex Operators
 
-Regex operators use quoted Rust regex patterns. Inline flags such as `(?i)` can be used for case-insensitive matching.
+Regex matching uses Rust regex syntax.
 
-Regex operators also support slash-delimited regex literals. The `i` flag enables case-insensitive matching:
+Quoted regex strings are passed to the regex compiler as written:
+
+```text
+provider =~ "(?i)powershell"
+provider !~ "(?i)defender"
+```
+
+Slash-delimited regex literals are also supported:
 
 ```text
 provider =~ /powershell/i
 Event.EventData.CommandLine =~ /cmd\.exe \/c/
 ```
 
-`in (...)` supports strings, numbers, and booleans:
+The only supported slash-literal flag is `i` for case-insensitive matching.
+Unsupported flags are parse errors.
+
+## Functions
+
+### `exists`
 
 ```text
-event.id in (4624, 4625)
-channel in ("Security", "System")
+exists(<field>)
+not exists(<field>)
 ```
 
-### Existence
+Returns true when a normalized alias or raw event field can be resolved. Fields
+with explicit JSON `null` values do not resolve to a scalar search value.
+
+### `cidr_contains`
 
 ```text
-exists(field.name)
-not exists(field.name)
+cidr_contains(<field>, "<cidr>")
 ```
 
-`exists` returns true when a normalized alias or raw event field can be resolved.
+Parses the field value as an IP address and returns true when it is inside the
+IPv4 or IPv6 CIDR range.
 
-### IP And CIDR Helpers
+### `ip_in_cidr`
+
+```text
+ip_in_cidr(<field>, "<cidr>")
+```
+
+Alias for `cidr_contains`.
+
+Examples:
 
 ```text
 cidr_contains(Event.EventData.SourceIp, "10.0.0.0/8")
-ip_in_cidr(Event.EventData.SourceIp, "192.168.1.0/24")
+ip_in_cidr(Event.EventData.DestinationIp, "192.168.1.0/24")
 cidr_contains(Event.EventData.SourceIpV6, "2001:db8::/32")
 ```
 
-`cidr_contains` and `ip_in_cidr` are aliases. They parse the field value as an
-IP address and return true when it is inside the supplied IPv4 or IPv6 CIDR
-range. Invalid IP field values do not match. Invalid CIDR literals are query
-parse errors.
+Invalid IP field values do not match. Invalid CIDR literals or invalid prefix
+lengths are query parse errors.
 
-### Pipelines
+## Pipeline Commands
 
-`stql` supports a `keep` projection stage after the filter expression:
+### `keep`
+
+```text
+<filter expression> | keep <field>, <field>, ...
+```
+
+`keep` selects additional fields for each matching event.
 
 ```text
 event.id == 4624 | keep timestamp, event.id, computer, Event.EventData.TargetUserName
 ```
 
-`keep` controls the additional fields returned for each matching event. The
-standard source identity fields are still shown in pretty output.
+Pretty output still includes source identity. JSON and JSONL output keep
+normalized metadata and source identity, then place projected values under
+`fields`.
 
-When neither `| keep` nor CLI `--fields` is supplied, pretty search output shows
-the full raw event record as a YAML-like nested block. Use `| keep` when the
-terminal output should stay focused on a small set of fields.
+If both `| keep ...` and CLI `--fields` are supplied, CLI `--fields` takes
+precedence.
 
-If both `| keep ...` and CLI `--fields` are provided, `--fields` takes precedence.
+Unsupported pipeline commands, such as `table`, `sort`, `limit`, `stats`, and
+`rename`, fail with an explicit `unsupported pipeline command` error.
 
-## Field Lookup
+## Query Planning
 
-`stitch` checks normalized aliases first, then falls back to raw JSON paths.
-
-Normalized aliases currently include:
+`stitch search` builds safe metadata prefilters for globally required `and`
+predicates on these normalized fields:
 
 ```text
 timestamp
 event.timestamp
-record_id
-event.record_id
+winlog.timestamp
 channel
 event.channel
+winlog.channel
 provider
 event.provider
+winlog.provider_name
 event.id
 event_id
 winlog.event_id
@@ -160,33 +257,41 @@ computer
 host
 host.name
 source.computer
-source.file_path
-source.collection_root
 ```
 
-Raw paths use dot notation against the parsed EVTX JSON shape:
+Prefilter operators:
 
 ```text
-Event.System.EventID
-Event.System.Channel
-Event.EventData.TargetUserName
+==
+<
+<=
+>
+>=
+in
 ```
 
-## Literals
+`or` and `not` branches are not extracted into prefilters because doing so could
+change query semantics. Safe sibling `and` predicates may still be extracted
+beside a `not` branch.
 
-Supported literals:
+Use `stitch search --explain --query '<query>'` to print the parsed query and
+planned prefilters.
 
-```text
-"quoted strings"
-12345
-true
-false
-```
+## Search Output Controls
 
-String escapes currently preserve the escaped character directly.
+`| keep` and `--fields` only control which event fields are shown. They do not
+change which events match.
+
+When neither `| keep` nor `--fields` is supplied:
+
+- pretty output includes the full raw event record as a YAML-like nested block;
+- JSON and JSONL output include the full raw event record under `raw`.
+
+Use projections for large searches to keep terminal output and JSONL rows
+focused.
 
 ## Current Limitations
 
-The following are planned but not implemented yet:
-
-1. Pipeline stages for sorting, limiting, aggregation, and renaming fields.
+STQL currently does not support aggregation, sorting, renaming, joins, arithmetic
+expressions, relative time literals, bare strings, negative numbers, floating
+point numbers, or multiple pipeline stages.

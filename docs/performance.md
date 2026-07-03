@@ -1,8 +1,8 @@
 # Performance Notes
 
 This page documents Stitch's concurrency behavior and the repeatable benchmark
-harness used to compare local changes. Timings here are workload-specific and
-should not be treated as universal performance claims.
+harness used to compare local changes. Public docs describe how to measure
+performance, not project-internal benchmark results.
 
 ## Rayon File-Level Parallelism
 
@@ -59,7 +59,7 @@ For a quick smoke run:
 STITCH_BENCH_PROFILE=dev STITCH_BENCH_REPETITIONS=1 scripts/bench-local.sh
 ```
 
-When publishing new timing results, include:
+When recording timing results during development, include:
 
 1. Date.
 2. Command.
@@ -67,116 +67,16 @@ When publishing new timing results, include:
 4. Job count.
 5. Wall-clock result.
 6. Notes about cache warmth and output destination.
+7. Peak resident memory when the change may affect buffering or streaming.
+8. Whether stdout was redirected, written to a file, or left attached to a
+   terminal.
 
-#### 2026-06-28 Repeated Generated Fixtures
+Prefer `cargo run --profile <profile> -- ...` or an explicit
+`target/<profile>/stitch` path. Do not benchmark an older installed `stitch`
+from `PATH`.
 
-Dataset:
-
-1. `/tmp/stitch-rayon-paths.txt`
-2. 1,000 repetitions of seven generated EVTX fixture paths.
-3. 7,000 file work items total.
-4. Commands were run after the binary was already built, using `cargo run --quiet`.
-5. These timings include process startup and fixture parser overhead.
-
-Path-list creation:
-
-```bash
-for i in {1..1000}; do
-  printf '%s\n' \
-    tests/fixtures/evtx/security-auth.evtx \
-    tests/fixtures/evtx/sysmon-activity.evtx \
-    tests/fixtures/evtx/wmi-activity.evtx \
-    tests/fixtures/evtx/task-scheduler-operational.evtx \
-    tests/fixtures/evtx/defender-operational.evtx \
-    tests/fixtures/evtx/system-services.evtx \
-    tests/fixtures/evtx/powershell-activity.evtx
-done > /tmp/stitch-rayon-paths.txt
-```
-
-Dump projected CSV to file:
-
-```bash
-command time -p cargo run --quiet -- -j 1 --paths-from /tmp/stitch-rayon-paths.txt dump --format csv --fields timestamp --fields event.id --fields computer --output /tmp/stitch-dump-j1.csv
-```
-
-Result: `real 9.02`
-
-```bash
-command time -p cargo run --quiet -- -j 4 --paths-from /tmp/stitch-rayon-paths.txt dump --format csv --fields timestamp --fields event.id --fields computer --output /tmp/stitch-dump-j4.csv
-```
-
-Result: `real 2.55`
-
-Search all events with quiet output:
-
-```bash
-command time -p cargo run --quiet -- -j 1 --paths-from /tmp/stitch-rayon-paths.txt --quiet search --query 'event.id >= 0' --format jsonl
-```
-
-Result: `real 8.91`
-
-```bash
-command time -p cargo run --quiet -- -j 4 --paths-from /tmp/stitch-rayon-paths.txt --quiet search --query 'event.id >= 0' --format jsonl
-```
-
-Result: `real 2.21`
-
-Non-correlation hunt with quiet output:
-
-```bash
-command time -p cargo run --quiet -- -j 1 --paths-from /tmp/stitch-rayon-paths.txt --quiet hunt --rules tests/fixtures/sigma --format jsonl
-```
-
-Result: `real 8.48`
-
-```bash
-command time -p cargo run --quiet -- -j 4 --paths-from /tmp/stitch-rayon-paths.txt --quiet hunt --rules tests/fixtures/sigma --format jsonl
-```
-
-Result: `real 2.22`
-
-Summary: on this repeated-fixture workload, `--jobs 4` was roughly 3.5x to 4.0x
-faster than `--jobs 1`. This is expected to overstate benefits for tiny input
-sets and understate or differ from benefits on large real-world EVTX
-collections.
-
-#### 2026-06-28 Quiet Hunt Fast Path
-
-Command:
-
-```bash
-STITCH_BENCH_REPETITIONS=1000 scripts/bench-local.sh
-```
-
-Change:
-
-1. Non-correlation `hunt --quiet` without `--stats` uses the record-scan
-   path after rule loading, preserving EVTX open/parse error behavior while
-   avoiding match rendering and rule evaluation.
-2. `search --quiet` still renders matching records. Quiet mode suppresses
-   non-result messages, not query output.
-
-Before:
-
-| Scenario | Jobs | real |
-| --- | ---: | ---: |
-| dump csv projected | 1 | 0.39 |
-| search metadata filter quiet | 1 | 0.38 |
-| hunt non-correlation quiet | 1 | 0.39 |
-| dump csv projected | 4 | 0.10 |
-| search metadata filter quiet | 4 | 0.10 |
-| hunt non-correlation quiet | 4 | 0.11 |
-
-After:
-
-| Scenario | Jobs | real |
-| --- | ---: | ---: |
-| dump csv projected | 1 | 0.38 |
-| search metadata filter quiet | 1 | 0.23 |
-| hunt non-correlation quiet | 1 | 0.36 |
-| dump csv projected | 4 | 0.10 |
-| search metadata filter quiet | 4 | 0.06 |
-| hunt non-correlation quiet | 4 | 0.06 |
-
-The dump row stayed effectively flat, while quiet search and quiet
-non-correlation hunt improved materially on the benchmarked workload.
+For large-file checks, use a generated or representative EVTX file that is large
+enough to exercise output buffering and parser throughput. Compare baseline and
+branch commands with the same binary profile, dataset, output destination, and
+cache conditions. Record benchmark notes in the pull request or local benchmark
+report rather than publishing dated results in this public page.
