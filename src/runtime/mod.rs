@@ -61,8 +61,6 @@ pub enum RunError {
     },
     #[error("search requires --query or --query-file")]
     MissingQuery,
-    #[error("search output format {format:?} is not supported yet")]
-    UnsupportedSearchFormat { format: OutputFormat },
     #[error(
         "invalid Sigma level {level:?}; expected informational, low, medium, high, or critical"
     )]
@@ -77,8 +75,6 @@ pub enum RunError {
     DumpCsvRequiresFields,
     #[error("dump --format csv does not support --raw; use --fields to choose CSV columns")]
     DumpCsvRawUnsupported,
-    #[error("dump --flatten is not supported yet; projected CSV already emits flat columns")]
-    DumpFlattenUnsupported,
     #[error("failed to create dump output file {path}: {source}")]
     DumpOutputCreate {
         path: String,
@@ -613,17 +609,9 @@ pub fn run_search(
     discovery: &DiscoveryConfig,
     common: &CommonArgs,
 ) -> Result<CommandOutcome, RunError> {
-    if matches!(
-        command.format,
-        OutputFormat::Csv | OutputFormat::Compact | OutputFormat::Timeline
-    ) {
-        return Err(RunError::UnsupportedSearchFormat {
-            format: command.format,
-        });
-    }
-
     let query = read_query(command)?;
     let query = parse_search_query(&query)?;
+    let format = OutputFormat::from(command.format);
 
     if command.explain {
         return Ok(CommandOutcome::message(format!("{query:#?}")));
@@ -654,7 +642,7 @@ pub fn run_search(
                     if query.matches(&event) {
                         stats.matched += 1;
 
-                        output.push(render_search_match(&event, output_fields, command.format));
+                        output.push(render_search_match(&event, output_fields, format));
                     }
                 },
                 |error| error_writer.write(error),
@@ -665,7 +653,7 @@ pub fn run_search(
         }
     } else if should_parallelize(&inputs, common) {
         for result in run_parallel_by_input(&inputs, common, |input| {
-            process_search_input(input, &query, output_fields, command, common)
+            process_search_input(input, &query, output_fields, format, common)
         })? {
             stats.merge(result.stats);
 
@@ -682,7 +670,7 @@ pub fn run_search(
         }
     } else {
         for input in &inputs {
-            let result = process_search_input(input, &query, output_fields, command, common)?;
+            let result = process_search_input(input, &query, output_fields, format, common)?;
             stats.merge(result.stats);
 
             for error in &result.errors {
@@ -726,7 +714,7 @@ fn process_search_input(
     input: &DiscoveredInput,
     query: &crate::query::SearchQuery,
     output_fields: &[String],
-    command: &SearchArgs,
+    format: OutputFormat,
     common: &CommonArgs,
 ) -> Result<SearchInputResult, RunError> {
     let mut result = SearchInputResult::default();
@@ -738,7 +726,7 @@ fn process_search_input(
             if query.matches(&event) {
                 result.stats.matched += 1;
                 result.output.push(SearchRenderedEvent {
-                    output: Some(render_search_match(&event, output_fields, command.format)),
+                    output: Some(render_search_match(&event, output_fields, format)),
                 });
             }
         },
@@ -773,9 +761,6 @@ pub fn run_dump(
     }
     if matches!(command.format, DumpFormat::Csv) && command.raw {
         return Err(RunError::DumpCsvRawUnsupported);
-    }
-    if command.flatten {
-        return Err(RunError::DumpFlattenUnsupported);
     }
 
     let inputs = discover_inputs(discovery)?;
@@ -1911,7 +1896,7 @@ mod tests {
 
     use serde_json::json;
 
-    use crate::cli::{CorrelationScope, HuntArgs, SearchArgs};
+    use crate::cli::{CorrelationScope, HuntArgs, SearchArgs, SearchOutputFormat};
     use crate::input::DiscoveredInput;
 
     use super::*;
@@ -1922,7 +1907,7 @@ mod tests {
             query: Some("event.id == 4625".to_owned()),
             query_file: None,
             fields: Vec::new(),
-            format: crate::cli::OutputFormat::Pretty,
+            format: SearchOutputFormat::Pretty,
             limit: None,
             errors: None,
             before_context: 0,
@@ -1949,7 +1934,7 @@ mod tests {
             query: None,
             query_file: None,
             fields: vec!["provider".to_owned()],
-            format: crate::cli::OutputFormat::Pretty,
+            format: SearchOutputFormat::Pretty,
             limit: None,
             errors: None,
             before_context: 0,

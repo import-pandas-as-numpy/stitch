@@ -199,8 +199,8 @@ pub struct SearchArgs {
     #[arg(long, value_name = "FIELD", help = "Fields to display")]
     pub fields: Vec<String>,
 
-    #[arg(long, value_enum, default_value_t = OutputFormat::Pretty)]
-    pub format: OutputFormat,
+    #[arg(long, value_enum, default_value_t = SearchOutputFormat::Pretty)]
+    pub format: SearchOutputFormat,
 
     #[arg(long, value_name = "N", help = "Stop after N matches")]
     pub limit: Option<usize>,
@@ -235,9 +235,6 @@ pub struct DumpArgs {
     #[arg(long, value_name = "FIELD", help = "Field projection")]
     pub fields: Vec<String>,
 
-    #[arg(long, help = "Flatten nested fields for CSV")]
-    pub flatten: bool,
-
     #[arg(long, help = "Preserve raw parsed event shape")]
     pub raw: bool,
 
@@ -265,6 +262,23 @@ pub enum OutputFormat {
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
+pub enum SearchOutputFormat {
+    Pretty,
+    Json,
+    Jsonl,
+}
+
+impl From<SearchOutputFormat> for OutputFormat {
+    fn from(format: SearchOutputFormat) -> Self {
+        match format {
+            SearchOutputFormat::Pretty => Self::Pretty,
+            SearchOutputFormat::Json => Self::Json,
+            SearchOutputFormat::Jsonl => Self::Jsonl,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
 pub enum DumpFormat {
     Jsonl,
     Json,
@@ -283,7 +297,7 @@ pub enum CorrelationScope {
 mod tests {
     use std::path::PathBuf;
 
-    use clap::Parser as _;
+    use clap::{CommandFactory as _, Parser as _};
 
     use super::{Cli, Command};
 
@@ -321,5 +335,76 @@ mod tests {
         assert_eq!(cli.common.input, [PathBuf::from("Security.evtx")]);
         assert!(cli.common.stats);
         assert!(matches!(cli.command, Command::Search(_)));
+    }
+
+    #[test]
+    fn search_help_lists_only_supported_formats() {
+        let help = Cli::command()
+            .find_subcommand_mut("search")
+            .expect("search subcommand should exist")
+            .render_help()
+            .to_string();
+
+        assert!(
+            help.contains("[possible values: pretty, json, jsonl]"),
+            "search help should list only supported formats:\n{help}"
+        );
+        assert!(!help.contains("csv"));
+        assert!(!help.contains("timeline"));
+    }
+
+    #[test]
+    fn search_rejects_unsupported_formats_at_parse_time() {
+        let error = Cli::try_parse_from([
+            "stitch",
+            "search",
+            "-q",
+            "event.id == 4625",
+            "--format",
+            "csv",
+        ])
+        .expect_err("search --format csv should be rejected by the parser");
+
+        assert!(
+            error.to_string().contains("invalid value 'csv'"),
+            "unsupported search format should fail as an invalid value, got:\n{error}"
+        );
+    }
+
+    #[test]
+    fn dump_help_does_not_advertise_flatten() {
+        let help = Cli::command()
+            .find_subcommand_mut("dump")
+            .expect("dump subcommand should exist")
+            .render_help()
+            .to_string();
+
+        assert!(
+            !help.contains("--flatten"),
+            "dump help should not list unimplemented --flatten flag:\n{help}"
+        );
+    }
+
+    #[test]
+    fn dump_rejects_flatten_at_parse_time() {
+        let error = Cli::try_parse_from([
+            "stitch",
+            "dump",
+            "-i",
+            "Security.evtx",
+            "--format",
+            "csv",
+            "--flatten",
+            "--fields",
+            "event.id",
+        ])
+        .expect_err("dump --flatten should be rejected by the parser");
+
+        assert!(
+            error
+                .to_string()
+                .contains("unexpected argument '--flatten'"),
+            "unimplemented dump flag should fail as an unexpected argument, got:\n{error}"
+        );
     }
 }
