@@ -111,7 +111,7 @@ fn hunt_matches_generated_evtx_with_windows_sigma_field_aliases() {
         "expected Defender event identity in hunt output, got:\n{stdout}"
     );
     assert!(
-        stdout.contains("stats: scanned=31 matched=4 rules=4 skipped_rules=0 inputs=7"),
+        stdout.contains("stats: scanned=39 matched=4 rules=4 skipped_rules=0 inputs=8"),
         "expected generated hunt stats to stay stable, got:\n{stdout}"
     );
 }
@@ -217,7 +217,7 @@ fn hunt_cli_filters_generated_sigma_rules() {
         "medium WMI rule should be filtered by --min-level high, got:\n{stdout}"
     );
     assert!(
-        stdout.contains("stats: scanned=31 matched=2 rules=2 skipped_rules=0 inputs=7"),
+        stdout.contains("stats: scanned=39 matched=2 rules=2 skipped_rules=0 inputs=8"),
         "expected filtered hunt stats, got:\n{stdout}"
     );
 }
@@ -258,7 +258,7 @@ fn hunt_cli_excludes_generated_sigma_rules_by_title_glob() {
         "non-excluded Sysmon rule should still match, got:\n{stdout}"
     );
     assert!(
-        stdout.contains("stats: scanned=31 matched=3 rules=3 skipped_rules=0 inputs=7"),
+        stdout.contains("stats: scanned=39 matched=3 rules=3 skipped_rules=0 inputs=8"),
         "expected exclude-rule hunt stats, got:\n{stdout}"
     );
 }
@@ -301,7 +301,7 @@ fn hunt_matches_generated_evtx_with_broader_sigma_grammar() {
         "expected null/condition-list Sigma grammar rule to match, got:\n{stdout}"
     );
     assert!(
-        stdout.contains("stats: scanned=31 matched=4 rules=3 skipped_rules=0 inputs=7"),
+        stdout.contains("stats: scanned=39 matched=4 rules=3 skipped_rules=0 inputs=8"),
         "expected broader grammar hunt stats, got:\n{stdout}"
     );
 }

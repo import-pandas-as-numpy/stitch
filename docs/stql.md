@@ -3,14 +3,16 @@
 STQL is the filter language used by `stitch search`. It is designed for fast
 event filtering over normalized Windows Event Log metadata and raw EVTX fields.
 
-STQL is not an aggregation language. The only supported pipeline command today
-is `keep`, which projects fields in search output.
+STQL supports fast event filtering plus a small KQL-inspired aggregation subset
+for grouped event summaries. Supported pipeline commands are `keep` and
+`summarize`.
 
 ## Query Shape
 
 ```text
 <filter expression>
 <filter expression> | keep <field>, <field>, ...
+<filter expression> | summarize <aggregate>, ... by <field>, ...
 ```
 
 Examples:
@@ -20,6 +22,7 @@ event.id == 4625
 event.id == 4624 and channel == "Security"
 Event.EventData.CommandLine contains_ci "powershell"
 provider =~ /powershell/i | keep timestamp, event.id, computer
+event.id in (4624, 4625) | summarize users=make_set(Event.EventData.TargetUserName), count() by Event.EventData.IpAddress
 ```
 
 ## Fields
@@ -232,6 +235,61 @@ normalized metadata and source identity, then place projected values under
 If both `| keep ...` and CLI `--fields` are supplied, CLI `--fields` takes
 precedence.
 
+### `summarize`
+
+```text
+<filter expression> | summarize <aggregate>, ... by <field>, ...
+<filter expression> | summarize <alias>=<aggregate>, ... by <alias>=<field>, ...
+<filter expression> | summarize by <field>, ...
+```
+
+`summarize` groups matching events and emits one row for each distinct
+combination of `by` field values. It is modeled after KQL's `summarize`
+operator, but currently supports only the aggregation functions that are most
+useful for Windows Event Log triage:
+
+| Function | Meaning |
+| --- | --- |
+| `count()` | Count matching events in the group. |
+| `make_set(<field>)` | Collect distinct non-null field values in the group. |
+| `make_set(<field>, <maxSize>)` | Collect up to `maxSize` distinct values. |
+
+The deprecated KQL alias `makeset()` is accepted as an alias for `make_set()`.
+The default `make_set` maximum is `1048576`, matching KQL. Use an explicit
+smaller `maxSize` when grouping high-cardinality fields in memory-constrained
+environments.
+
+Examples:
+
+```text
+event.id in (4624, 4625)
+| summarize logon_types=make_set(Event.EventData.LogonType),
+            users=make_set(Event.EventData.TargetUserName),
+            total=count()
+  by source_ip=Event.EventData.IpAddress
+```
+
+```text
+event.id == 4624 | summarize by computer, Event.EventData.TargetUserName
+```
+
+JSON and JSONL summary output uses `groups` and `aggregates` objects:
+
+```json
+{"groups":{"source_ip":"198.51.100.25"},"aggregates":{"users":["service-build"],"total":1}}
+```
+
+Missing group-by fields are represented as `null` in JSON output and `-` in
+pretty output. Missing aggregate field values are ignored by `make_set`.
+
+Unsupported KQL aggregation functions currently include dynamic functions such
+as `make_list()` and `make_bag()`, row selectors such as `arg_max()`,
+approximate functions such as `dcount()` and `hll()`, and numeric/statistical
+functions such as `sum()`, `avg()`, `min()`, `max()`, percentiles, variance, and
+standard deviation. These are intentionally deferred until the CLI has
+well-defined numeric typing, expression evaluation, and memory controls for
+those use cases.
+
 Unsupported pipeline commands, such as `table`, `sort`, `limit`, `stats`, and
 `rename`, fail with an explicit `unsupported pipeline command` error.
 
@@ -280,7 +338,8 @@ planned prefilters.
 ## Search Output Controls
 
 `| keep` and `--fields` only control which event fields are shown. They do not
-change which events match.
+change which events match. `| summarize` changes output shape from matching
+events to grouped summary rows.
 
 When neither `| keep` nor `--fields` is supplied:
 
@@ -292,6 +351,7 @@ focused.
 
 ## Current Limitations
 
-STQL currently does not support aggregation, sorting, renaming, joins, arithmetic
+STQL currently does not support sorting, renaming, joins, arithmetic
 expressions, relative time literals, bare strings, negative numbers, floating
-point numbers, or multiple pipeline stages.
+point numbers, arbitrary scalar expressions in `summarize`, or multiple
+pipeline stages.

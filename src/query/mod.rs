@@ -21,6 +21,7 @@ pub enum Expr {
 pub struct SearchQuery {
     pub filter: Expr,
     pub keep_fields: Vec<String>,
+    pub summarize: Option<Summarize>,
     prefilter: MetadataPrefilter,
 }
 
@@ -43,6 +44,32 @@ pub struct CidrContains {
     field: String,
     network: IpNetwork,
 }
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Summarize {
+    pub aggregates: Vec<Aggregate>,
+    pub group_by: Vec<GroupBy>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Aggregate {
+    pub alias: String,
+    pub function: AggregateFunction,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AggregateFunction {
+    Count,
+    MakeSet { field: String, max_size: usize },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GroupBy {
+    pub alias: String,
+    pub field: String,
+}
+
+const DEFAULT_MAKE_SET_MAX_SIZE: usize = 1_048_576;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Operator {
@@ -93,6 +120,14 @@ pub enum QueryError {
     UnsupportedPipeline { command: String },
     #[error("keep requires at least one field")]
     EmptyKeep,
+    #[error("summarize requires at least one aggregate or group-by field")]
+    EmptySummarize,
+    #[error("unsupported aggregate function {function:?}")]
+    UnsupportedAggregate { function: String },
+    #[error("aggregate function {function:?} requires field argument")]
+    MissingAggregateField { function: String },
+    #[error("aggregate max size {value} is too large for this platform")]
+    AggregateMaxSizeTooLarge { value: u64 },
 }
 
 #[cfg(test)]
@@ -118,11 +153,15 @@ pub fn parse_search_query(query: &str) -> Result<SearchQuery, QueryError> {
 
     let mut parser = Parser::new(tokens);
     let filter = parser.parse_or()?;
-    let keep_fields = if parser.consume_symbol(Symbol::Pipe) {
-        parser.parse_pipeline()?
-    } else {
-        Vec::new()
-    };
+    let mut keep_fields = Vec::new();
+    let mut summarize = None;
+
+    if parser.consume_symbol(Symbol::Pipe) {
+        match parser.parse_pipeline()? {
+            Pipeline::Keep(fields) => keep_fields = fields,
+            Pipeline::Summarize(statement) => summarize = Some(statement),
+        }
+    }
     parser.expect_end()?;
 
     let prefilter = MetadataPrefilter::from_expr(&filter);
@@ -130,6 +169,7 @@ pub fn parse_search_query(query: &str) -> Result<SearchQuery, QueryError> {
     Ok(SearchQuery {
         filter,
         keep_fields,
+        summarize,
         prefilter,
     })
 }
@@ -160,6 +200,12 @@ impl Expr {
             Self::Or(left, right) => left.evaluate(event) || right.evaluate(event),
         }
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Pipeline {
+    Keep(Vec<String>),
+    Summarize(Summarize),
 }
 
 #[derive(Debug, Clone, Default)]
@@ -588,14 +634,18 @@ impl Parser {
         }))
     }
 
-    fn parse_pipeline(&mut self) -> Result<Vec<String>, QueryError> {
+    fn parse_pipeline(&mut self) -> Result<Pipeline, QueryError> {
         let command = self.expect_ident("pipeline command")?;
 
-        if !command.eq_ignore_ascii_case("keep") {
-            return Err(QueryError::UnsupportedPipeline { command });
+        if command.eq_ignore_ascii_case("keep") {
+            return self.parse_keep_fields().map(Pipeline::Keep);
         }
 
-        self.parse_keep_fields()
+        if command.eq_ignore_ascii_case("summarize") {
+            return self.parse_summarize().map(Pipeline::Summarize);
+        }
+
+        Err(QueryError::UnsupportedPipeline { command })
     }
 
     fn parse_keep_fields(&mut self) -> Result<Vec<String>, QueryError> {
@@ -612,10 +662,127 @@ impl Parser {
         Ok(fields)
     }
 
-    fn consume_keyword(&mut self, keyword: &str) -> bool {
-        if self.peek().is_some_and(
+    fn parse_summarize(&mut self) -> Result<Summarize, QueryError> {
+        let aggregates = if self.peek_keyword("by") || self.peek().is_none() {
+            Vec::new()
+        } else {
+            self.parse_aggregates()?
+        };
+
+        let group_by = if self.consume_keyword("by") {
+            self.parse_group_by_fields()?
+        } else {
+            Vec::new()
+        };
+
+        if aggregates.is_empty() && group_by.is_empty() {
+            return Err(QueryError::EmptySummarize);
+        }
+
+        Ok(Summarize {
+            aggregates,
+            group_by,
+        })
+    }
+
+    fn parse_aggregates(&mut self) -> Result<Vec<Aggregate>, QueryError> {
+        let mut aggregates = vec![self.parse_aggregate()?];
+
+        while self.consume_symbol(Symbol::Comma) {
+            if self.peek_keyword("by") {
+                break;
+            }
+
+            aggregates.push(self.parse_aggregate()?);
+        }
+
+        Ok(aggregates)
+    }
+
+    fn parse_aggregate(&mut self) -> Result<Aggregate, QueryError> {
+        let first = self.expect_ident("aggregate function or alias")?;
+        let (alias, function_name) = if self.consume_symbol(Symbol::Assign) {
+            (Some(first), self.expect_ident("aggregate function")?)
+        } else {
+            (None, first)
+        };
+
+        self.expect_symbol(Symbol::LeftParen)?;
+        let function = self.parse_aggregate_function(&function_name)?;
+        self.expect_symbol(Symbol::RightParen)?;
+
+        let alias = alias.unwrap_or_else(|| default_aggregate_alias(&function));
+
+        Ok(Aggregate { alias, function })
+    }
+
+    fn parse_aggregate_function(
+        &mut self,
+        function_name: &str,
+    ) -> Result<AggregateFunction, QueryError> {
+        if function_name.eq_ignore_ascii_case("count") {
+            return Ok(AggregateFunction::Count);
+        }
+
+        if function_name.eq_ignore_ascii_case("make_set")
+            || function_name.eq_ignore_ascii_case("makeset")
+        {
+            let field = self
+                .consume_ident()
+                .ok_or_else(|| QueryError::MissingAggregateField {
+                    function: function_name.to_owned(),
+                })?;
+            let max_size = if self.consume_symbol(Symbol::Comma) {
+                let value = self.expect_number_literal()?;
+                usize::try_from(value)
+                    .map_err(|_| QueryError::AggregateMaxSizeTooLarge { value })?
+            } else {
+                DEFAULT_MAKE_SET_MAX_SIZE
+            };
+
+            return Ok(AggregateFunction::MakeSet { field, max_size });
+        }
+
+        Err(QueryError::UnsupportedAggregate {
+            function: function_name.to_owned(),
+        })
+    }
+
+    fn parse_group_by_fields(&mut self) -> Result<Vec<GroupBy>, QueryError> {
+        let mut fields = vec![self.parse_group_by_field()?];
+
+        while self.consume_symbol(Symbol::Comma) {
+            fields.push(self.parse_group_by_field()?);
+        }
+
+        Ok(fields)
+    }
+
+    fn parse_group_by_field(&mut self) -> Result<GroupBy, QueryError> {
+        let first = self.expect_ident("group-by field or alias")?;
+
+        if self.consume_symbol(Symbol::Assign) {
+            let field = self.expect_ident("group-by field")?;
+            Ok(GroupBy {
+                alias: first,
+                field,
+            })
+        } else {
+            Ok(GroupBy {
+                alias: first.clone(),
+                field: first,
+            })
+        }
+    }
+
+    fn peek_keyword(&self, keyword: &str) -> bool {
+        self.peek().is_some_and(
             |token| matches!(token, Token::Ident(value) if value.eq_ignore_ascii_case(keyword)),
-        ) {
+        )
+    }
+
+    fn consume_keyword(&mut self, keyword: &str) -> bool {
+        if self.peek_keyword(keyword) {
             self.position += 1;
             return true;
         }
@@ -656,9 +823,30 @@ impl Parser {
         }
     }
 
+    fn consume_ident(&mut self) -> Option<String> {
+        match self.peek() {
+            Some(Token::Ident(value)) => {
+                let value = value.clone();
+                self.position += 1;
+                Some(value)
+            }
+            Some(
+                Token::String(_)
+                | Token::Regex(_)
+                | Token::Number(_)
+                | Token::Operator(_)
+                | Token::Symbol(_),
+            )
+            | None => None,
+        }
+    }
+
     fn expect_operator(&mut self) -> Result<Operator, QueryError> {
         match self.next() {
             Some(Token::Operator(operator)) => Ok(operator),
+            Some(Token::Symbol(Symbol::Assign)) => Err(QueryError::UnexpectedToken {
+                token: "=".to_owned(),
+            }),
             Some(Token::Ident(value)) => match value.as_str() {
                 "contains" => Ok(Operator::Contains),
                 "contains_ci" => Ok(Operator::ContainsCi),
@@ -691,6 +879,16 @@ impl Parser {
             Some(Token::String(value)) => Ok(value),
             other => Err(QueryError::Expected {
                 expected: "string literal".to_owned(),
+                found: token_label(other.as_ref()),
+            }),
+        }
+    }
+
+    fn expect_number_literal(&mut self) -> Result<u64, QueryError> {
+        match self.next() {
+            Some(Token::Number(value)) => Ok(value),
+            other => Err(QueryError::Expected {
+                expected: "number literal".to_owned(),
                 found: token_label(other.as_ref()),
             }),
         }
@@ -776,6 +974,7 @@ enum Symbol {
     RightParen,
     Comma,
     Pipe,
+    Assign,
 }
 
 fn tokenize(query: &str) -> Result<Vec<Token>, QueryError> {
@@ -803,6 +1002,10 @@ fn tokenize(query: &str) -> Result<Vec<Token>, QueryError> {
                 chars.next();
                 tokens.push(Token::Symbol(Symbol::Pipe));
             }
+            '=' if !matches!(peek_second(&chars), Some('=' | '~')) => {
+                chars.next();
+                tokens.push(Token::Symbol(Symbol::Assign));
+            }
             '"' => tokens.push(Token::String(read_string(&mut chars)?)),
             '/' => tokens.push(Token::Regex(read_regex_literal(&mut chars)?)),
             '0'..='9' => tokens.push(Token::Number(read_number(&mut chars)?)),
@@ -817,6 +1020,19 @@ fn tokenize(query: &str) -> Result<Vec<Token>, QueryError> {
     }
 
     Ok(tokens)
+}
+
+fn default_aggregate_alias(function: &AggregateFunction) -> String {
+    match function {
+        AggregateFunction::Count => "count".to_owned(),
+        AggregateFunction::MakeSet { field, .. } => format!("set_{field}"),
+    }
+}
+
+fn peek_second(chars: &std::iter::Peekable<std::str::CharIndices<'_>>) -> Option<char> {
+    let mut clone = chars.clone();
+    clone.next();
+    clone.peek().map(|(_, character)| *character)
 }
 
 fn read_string(

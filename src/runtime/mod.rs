@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     fmt::Write as _,
     fs::{self, File},
     io::{BufWriter, IsTerminal as _, Stdout, Write as _},
@@ -22,7 +22,7 @@ use crate::output::{
     DisplayStyle, dump_json_value, render_event_payload, render_search_match,
     search_match_delimiter,
 };
-use crate::query::{QueryError, parse_search_query};
+use crate::query::{AggregateFunction, QueryError, SearchQuery, Summarize, parse_search_query};
 use crate::sigma::{
     CorrelationRuntimeScope, SigmaCorrelationEngine, SigmaCorrelationMatch, SigmaCorrelationRule,
     SigmaEventContext, SigmaLoadError, SigmaRule, load_sigma_rules, load_sigma_rules_non_strict,
@@ -744,6 +744,19 @@ pub fn run_search(
     let mut stats = SearchStats::default();
     let mut error_writer = ErrorWriter::new(command.errors.as_ref())?;
 
+    if let Some(summarize) = &query.summarize {
+        return run_aggregate_search(
+            &inputs,
+            &query,
+            summarize,
+            command,
+            common,
+            format,
+            style,
+            error_writer,
+        );
+    }
+
     if command.limit.is_some() || !should_parallelize(&inputs, common) {
         let mut stdout = SearchOutput::stdout(format, style);
 
@@ -917,7 +930,7 @@ impl SearchOutput {
 
 fn process_search_input(
     input: &DiscoveredInput,
-    query: &crate::query::SearchQuery,
+    query: &SearchQuery,
     output_fields: &[String],
     format: OutputFormat,
     style: DisplayStyle,
@@ -946,6 +959,444 @@ fn process_search_input(
         .add_parse_error_samples(read_stats.error_samples);
 
     Ok(result)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_aggregate_search(
+    inputs: &[DiscoveredInput],
+    query: &SearchQuery,
+    summarize: &Summarize,
+    command: &SearchArgs,
+    common: &CommonArgs,
+    format: OutputFormat,
+    style: DisplayStyle,
+    mut error_writer: ErrorWriter,
+) -> Result<CommandOutcome, RunError> {
+    let mut aggregate_state = AggregateState::new(summarize);
+    let mut search_stats = SearchStats::default();
+
+    if command.limit.is_some() || !should_parallelize(inputs, common) {
+        for input in inputs {
+            if reached_limit(command.limit, search_stats.matched) {
+                break;
+            }
+
+            let read_stats = read_evtx_events_with_errors(
+                input,
+                common.strict,
+                |event| {
+                    if reached_limit(command.limit, search_stats.matched) {
+                        return;
+                    }
+
+                    search_stats.scanned += 1;
+
+                    if query.matches(&event) {
+                        search_stats.matched += 1;
+                        aggregate_state.add_event(&event, summarize);
+                    }
+                },
+                |error| error_writer.write(error),
+            )?;
+
+            search_stats.parse_errors += read_stats.records_failed;
+            search_stats.add_parse_error_samples(read_stats.error_samples);
+        }
+    } else {
+        for result in run_parallel_by_input(inputs, common, |input| {
+            process_aggregate_input(input, query, summarize, common)
+        })? {
+            search_stats.merge(result.stats);
+
+            for error in &result.errors {
+                error_writer.write(error);
+            }
+
+            aggregate_state.merge(result.state);
+        }
+    }
+
+    error_writer.finish()?;
+
+    let mut output =
+        render_aggregate_rows(&aggregate_state.rows(summarize), summarize, format, style);
+
+    if common.stats && !common.quiet {
+        if !output.is_empty() {
+            output.push_str("\n\n");
+        }
+        output.push_str(&search_stats.render());
+    }
+
+    Ok(CommandOutcome {
+        message: (!output.is_empty()).then_some(output),
+        diagnostic: None,
+    })
+}
+
+#[derive(Debug)]
+struct AggregateInputResult {
+    state: AggregateState,
+    errors: Vec<EvtxRecordError>,
+    stats: SearchStats,
+}
+
+fn process_aggregate_input(
+    input: &DiscoveredInput,
+    query: &SearchQuery,
+    summarize: &Summarize,
+    common: &CommonArgs,
+) -> Result<AggregateInputResult, RunError> {
+    let mut result = AggregateInputResult {
+        state: AggregateState::new(summarize),
+        errors: Vec::new(),
+        stats: SearchStats::default(),
+    };
+
+    let read_stats = read_evtx_events_with_errors(
+        input,
+        common.strict,
+        |event| {
+            if query.matches(&event) {
+                result.stats.matched += 1;
+                result.state.add_event(&event, summarize);
+            }
+        },
+        |error| result.errors.push(error.clone()),
+    )?;
+
+    result.stats.scanned += read_stats.records_seen;
+    result.stats.parse_errors += read_stats.records_failed;
+    result
+        .stats
+        .add_parse_error_samples(read_stats.error_samples);
+
+    Ok(result)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+struct GroupKey(Vec<Option<String>>);
+
+#[derive(Debug)]
+struct AggregateState {
+    rows: HashMap<GroupKey, AggregateRowState>,
+    aggregate_count: usize,
+}
+
+#[derive(Debug)]
+struct AggregateRowState {
+    groups: Vec<Option<String>>,
+    aggregates: Vec<AggregateValue>,
+}
+
+#[derive(Debug)]
+enum AggregateValue {
+    Count(u64),
+    MakeSet {
+        values: Vec<String>,
+        seen: HashSet<String>,
+        max_size: usize,
+    },
+}
+
+#[derive(Debug)]
+struct AggregateRow {
+    groups: Vec<Option<String>>,
+    aggregates: Vec<AggregateOutputValue>,
+}
+
+#[derive(Debug)]
+enum AggregateOutputValue {
+    Number(u64),
+    List(Vec<String>),
+}
+
+impl AggregateState {
+    fn new(summarize: &Summarize) -> Self {
+        Self {
+            rows: HashMap::new(),
+            aggregate_count: summarize.aggregates.len(),
+        }
+    }
+
+    fn add_event(&mut self, event: &Event, summarize: &Summarize) {
+        let groups = summarize
+            .group_by
+            .iter()
+            .map(|group| {
+                event
+                    .field(&group.field)
+                    .and_then(crate::event::FieldValue::as_text)
+            })
+            .collect::<Vec<_>>();
+        let key = GroupKey(groups.clone());
+        let row = self
+            .rows
+            .entry(key)
+            .or_insert_with(|| AggregateRowState::new(groups, summarize));
+
+        row.add_event(event, summarize);
+    }
+
+    fn merge(&mut self, other: Self) {
+        for (key, other_row) in other.rows {
+            let row = self.rows.entry(key).or_insert_with(|| {
+                AggregateRowState::from_values(other_row.groups.clone(), self.aggregate_count)
+            });
+            row.merge(other_row);
+        }
+    }
+
+    fn rows(&self, summarize: &Summarize) -> Vec<AggregateRow> {
+        let mut rows = self
+            .rows
+            .values()
+            .map(AggregateRowState::to_output_row)
+            .collect::<Vec<_>>();
+
+        rows.sort_by(|left, right| {
+            left.groups
+                .cmp(&right.groups)
+                .then_with(|| aggregate_row_tiebreak(left, right, summarize))
+        });
+
+        rows
+    }
+}
+
+impl AggregateRowState {
+    fn new(groups: Vec<Option<String>>, summarize: &Summarize) -> Self {
+        Self {
+            groups,
+            aggregates: summarize
+                .aggregates
+                .iter()
+                .map(|aggregate| match aggregate.function {
+                    AggregateFunction::Count => AggregateValue::Count(0),
+                    AggregateFunction::MakeSet { max_size, .. } => AggregateValue::MakeSet {
+                        values: Vec::new(),
+                        seen: HashSet::new(),
+                        max_size,
+                    },
+                })
+                .collect(),
+        }
+    }
+
+    fn from_values(groups: Vec<Option<String>>, aggregate_count: usize) -> Self {
+        Self {
+            groups,
+            aggregates: Vec::with_capacity(aggregate_count),
+        }
+    }
+
+    fn add_event(&mut self, event: &Event, summarize: &Summarize) {
+        for (value, aggregate) in self.aggregates.iter_mut().zip(&summarize.aggregates) {
+            match (value, &aggregate.function) {
+                (AggregateValue::Count(count), AggregateFunction::Count) => *count += 1,
+                (
+                    AggregateValue::MakeSet {
+                        values,
+                        seen,
+                        max_size,
+                    },
+                    AggregateFunction::MakeSet { field, .. },
+                ) => {
+                    if values.len() >= *max_size {
+                        continue;
+                    }
+
+                    if let Some(text) = event
+                        .field(field)
+                        .and_then(crate::event::FieldValue::as_text)
+                        && seen.insert(text.clone())
+                    {
+                        values.push(text);
+                    }
+                }
+                (
+                    AggregateValue::Count(_) | AggregateValue::MakeSet { .. },
+                    AggregateFunction::Count | AggregateFunction::MakeSet { .. },
+                ) => {}
+            }
+        }
+    }
+
+    fn merge(&mut self, other: Self) {
+        if self.aggregates.is_empty() {
+            self.aggregates = other.aggregates;
+            return;
+        }
+
+        for (value, other_value) in self.aggregates.iter_mut().zip(other.aggregates) {
+            match (value, other_value) {
+                (AggregateValue::Count(count), AggregateValue::Count(other_count)) => {
+                    *count += other_count;
+                }
+                (
+                    AggregateValue::MakeSet {
+                        values,
+                        seen,
+                        max_size,
+                    },
+                    AggregateValue::MakeSet {
+                        values: other_values,
+                        ..
+                    },
+                ) => {
+                    for text in other_values {
+                        if values.len() >= *max_size {
+                            break;
+                        }
+
+                        if seen.insert(text.clone()) {
+                            values.push(text);
+                        }
+                    }
+                }
+                (
+                    AggregateValue::Count(_) | AggregateValue::MakeSet { .. },
+                    AggregateValue::Count(_) | AggregateValue::MakeSet { .. },
+                ) => {}
+            }
+        }
+    }
+
+    fn to_output_row(&self) -> AggregateRow {
+        AggregateRow {
+            groups: self.groups.clone(),
+            aggregates: self
+                .aggregates
+                .iter()
+                .map(|value| match value {
+                    AggregateValue::Count(count) => AggregateOutputValue::Number(*count),
+                    AggregateValue::MakeSet { values, .. } => {
+                        let mut values = values.clone();
+                        values.sort();
+                        AggregateOutputValue::List(values)
+                    }
+                })
+                .collect(),
+        }
+    }
+}
+
+fn aggregate_row_tiebreak(
+    left: &AggregateRow,
+    right: &AggregateRow,
+    _summarize: &Summarize,
+) -> std::cmp::Ordering {
+    left.aggregates.len().cmp(&right.aggregates.len())
+}
+
+fn render_aggregate_rows(
+    rows: &[AggregateRow],
+    summarize: &Summarize,
+    format: OutputFormat,
+    style: DisplayStyle,
+) -> String {
+    match format {
+        OutputFormat::Json => {
+            let value = rows
+                .iter()
+                .map(|row| aggregate_row_json(row, summarize))
+                .collect::<Vec<_>>();
+            serde_json::to_string_pretty(&value)
+                .expect("serializing aggregate rows should not fail")
+        }
+        OutputFormat::Jsonl => rows
+            .iter()
+            .map(|row| aggregate_row_json(row, summarize).to_string())
+            .collect::<Vec<_>>()
+            .join("\n"),
+        OutputFormat::Pretty
+        | OutputFormat::Compact
+        | OutputFormat::Csv
+        | OutputFormat::Timeline => render_aggregate_rows_pretty(rows, summarize, style),
+    }
+}
+
+fn aggregate_row_json(row: &AggregateRow, summarize: &Summarize) -> serde_json::Value {
+    let groups = summarize
+        .group_by
+        .iter()
+        .zip(&row.groups)
+        .map(|(group, value)| {
+            (
+                group.alias.clone(),
+                value
+                    .as_ref()
+                    .map_or(serde_json::Value::Null, |text| json!(text)),
+            )
+        })
+        .collect::<serde_json::Map<_, _>>();
+    let aggregates = summarize
+        .aggregates
+        .iter()
+        .zip(&row.aggregates)
+        .map(|(aggregate, value)| {
+            let value = match value {
+                AggregateOutputValue::Number(number) => json!(number),
+                AggregateOutputValue::List(values) => json!(values),
+            };
+            (aggregate.alias.clone(), value)
+        })
+        .collect::<serde_json::Map<_, _>>();
+
+    json!({
+        "groups": groups,
+        "aggregates": aggregates,
+    })
+}
+
+fn render_aggregate_rows_pretty(
+    rows: &[AggregateRow],
+    summarize: &Summarize,
+    style: DisplayStyle,
+) -> String {
+    rows.iter()
+        .map(|row| render_aggregate_row_pretty(row, summarize, style))
+        .collect::<Vec<_>>()
+        .join("\n\n")
+}
+
+fn render_aggregate_row_pretty(
+    row: &AggregateRow,
+    summarize: &Summarize,
+    style: DisplayStyle,
+) -> String {
+    let mut output = String::new();
+    let label = styled_label("summary", style);
+    let _ = write!(output, "{label}");
+
+    for (group, value) in summarize.group_by.iter().zip(&row.groups) {
+        let field = styled_label(&group.alias, style);
+        let value = value.as_deref().unwrap_or("-");
+        let _ = write!(output, "\n  {field}: {value}");
+    }
+
+    for (aggregate, value) in summarize.aggregates.iter().zip(&row.aggregates) {
+        let field = styled_label(&aggregate.alias, style);
+        match value {
+            AggregateOutputValue::Number(number) => {
+                let _ = write!(output, "\n  {field}: {number}");
+            }
+            AggregateOutputValue::List(values) => {
+                let joined = values.join(", ");
+                let _ = write!(output, "\n  {field}: [{joined}]");
+            }
+        }
+    }
+
+    output
+}
+
+fn styled_label(text: &str, style: DisplayStyle) -> std::borrow::Cow<'_, str> {
+    if style.colored() {
+        std::borrow::Cow::Owned(format!("\x1b[2;36m{text}\x1b[0m"))
+    } else {
+        std::borrow::Cow::Borrowed(text)
+    }
 }
 
 fn search_display_style(common: &CommonArgs) -> DisplayStyle {
