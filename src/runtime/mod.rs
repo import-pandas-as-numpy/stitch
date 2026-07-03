@@ -28,6 +28,7 @@ use crate::sigma::{
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CommandOutcome {
     pub message: Option<String>,
+    pub diagnostic: Option<String>,
 }
 
 #[derive(Debug, Error)]
@@ -99,6 +100,7 @@ impl CommandOutcome {
     pub fn message(message: impl Into<String>) -> Self {
         Self {
             message: Some(message.into()),
+            diagnostic: None,
         }
     }
 }
@@ -127,10 +129,6 @@ pub fn run_hunt(
         &mut correlation_engine,
     )?;
 
-    if common.quiet {
-        return Ok(CommandOutcome { message: None });
-    }
-
     if common.stats {
         if correlation_rules == 0 {
             output.push(format!(
@@ -156,18 +154,22 @@ pub fn run_hunt(
                 inputs.len()
             ));
         }
-    } else if output.is_empty() {
-        output.push(format!(
-            "hunt loaded {} Sigma rule(s), loaded {} correlation rule(s), skipped {} rule(s), discovered {} EVTX input(s), matched 0 event(s)",
+    }
+
+    let diagnostic = (command.summary && !common.quiet).then(|| {
+        format!(
+            "hunt loaded {} Sigma rule(s), loaded {} correlation rule(s), skipped {} rule(s), discovered {} EVTX input(s), matched {} event(s)",
             hunt_plan.alert_rule_count,
             correlation_rules,
             skipped_correlation,
-            inputs.len()
-        ));
-    }
+            inputs.len(),
+            matched + correlation_matched
+        )
+    });
 
     Ok(CommandOutcome {
         message: (!output.is_empty()).then(|| output.join("\n\n")),
+        diagnostic,
     })
 }
 
@@ -652,9 +654,7 @@ pub fn run_search(
                     if query.matches(&event) {
                         stats.matched += 1;
 
-                        if !common.quiet {
-                            output.push(render_search_match(&event, output_fields, command.format));
-                        }
+                        output.push(render_search_match(&event, output_fields, command.format));
                     }
                 },
                 |error| error_writer.write(error),
@@ -673,14 +673,12 @@ pub fn run_search(
                 error_writer.write(error);
             }
 
-            if !common.quiet {
-                output.extend(
-                    result
-                        .output
-                        .into_iter()
-                        .filter_map(|rendered| rendered.output),
-                );
-            }
+            output.extend(
+                result
+                    .output
+                    .into_iter()
+                    .filter_map(|rendered| rendered.output),
+            );
         }
     } else {
         for input in &inputs {
@@ -691,14 +689,12 @@ pub fn run_search(
                 error_writer.write(error);
             }
 
-            if !common.quiet {
-                output.extend(
-                    result
-                        .output
-                        .into_iter()
-                        .filter_map(|rendered| rendered.output),
-                );
-            }
+            output.extend(
+                result
+                    .output
+                    .into_iter()
+                    .filter_map(|rendered| rendered.output),
+            );
         }
     }
 
@@ -710,6 +706,7 @@ pub fn run_search(
 
     Ok(CommandOutcome {
         message: (!output.is_empty()).then(|| output.join("\n\n")),
+        diagnostic: None,
     })
 }
 
@@ -734,19 +731,6 @@ fn process_search_input(
 ) -> Result<SearchInputResult, RunError> {
     let mut result = SearchInputResult::default();
 
-    if common.quiet && !common.stats {
-        let read_stats = read_evtx_records_with_errors(input, common.strict, |error| {
-            result.errors.push(error.clone());
-        })?;
-        result.stats.scanned += read_stats.records_seen;
-        result.stats.parse_errors += read_stats.records_failed;
-        result
-            .stats
-            .add_parse_error_samples(read_stats.error_samples);
-
-        return Ok(result);
-    }
-
     let read_stats = read_evtx_events_with_errors(
         input,
         common.strict,
@@ -754,8 +738,7 @@ fn process_search_input(
             if query.matches(&event) {
                 result.stats.matched += 1;
                 result.output.push(SearchRenderedEvent {
-                    output: (!common.quiet)
-                        .then(|| render_search_match(&event, output_fields, command.format)),
+                    output: Some(render_search_match(&event, output_fields, command.format)),
                 });
             }
         },
@@ -840,6 +823,7 @@ pub fn run_dump(
 
     Ok(CommandOutcome {
         message: (!message.is_empty()).then(|| message.join("\n")),
+        diagnostic: None,
     })
 }
 
