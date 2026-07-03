@@ -135,10 +135,10 @@ a:hover {
 
 .shell {
   display: grid;
-  grid-template-columns: minmax(210px, 260px) minmax(0, 820px) minmax(180px, 240px);
-  gap: clamp(24px, 4vw, 48px);
+  grid-template-columns: minmax(210px, 250px) minmax(0, 1040px) minmax(170px, 220px);
+  gap: clamp(22px, 3vw, 40px);
   margin: 0 auto;
-  max-width: 1440px;
+  max-width: 1640px;
   padding: 34px clamp(18px, 4vw, 48px) 54px;
 }
 
@@ -164,7 +164,11 @@ a:hover {
   text-transform: uppercase;
 }
 
-.nav-group a {
+.nav-item {
+  margin-bottom: 2px;
+}
+
+.nav-group > .nav-item > a {
   display: block;
   border-left: 2px solid transparent;
   border-radius: 0 8px 8px 0;
@@ -173,31 +177,56 @@ a:hover {
   text-decoration: none;
 }
 
-.nav-group a span,
-.nav-group a small {
+.nav-group > .nav-item > a span,
+.nav-group > .nav-item > a small {
   display: block;
 }
 
-.nav-group a span {
+.nav-group > .nav-item > a span {
   font-size: 0.94rem;
   font-weight: 700;
 }
 
-.nav-group a small {
+.nav-group > .nav-item > a small {
   color: var(--muted);
   font-size: 0.78rem;
   line-height: 1.35;
   margin-top: 1px;
 }
 
-.nav-group a[aria-current="page"],
-.nav-group a:hover {
+.nav-group > .nav-item > a[aria-current="page"],
+.nav-group > .nav-item > a:hover {
   border-left-color: var(--secondary);
   background: rgba(255, 255, 255, 0.04);
 }
 
-.nav-group a[aria-current="page"] span,
-.nav-group a:hover span {
+.nav-group > .nav-item > a[aria-current="page"] span,
+.nav-group > .nav-item > a:hover span {
+  color: var(--primary);
+}
+
+.nav-sections {
+  list-style: none;
+  margin: 4px 0 10px 0;
+  padding: 0 0 0 16px;
+}
+
+.nav-sections li {
+  margin: 0;
+}
+
+.nav-sections a {
+  display: block;
+  border-left: 1px solid rgba(255, 255, 255, 0.12);
+  color: rgba(224, 230, 240, 0.68);
+  font-size: 0.8rem;
+  line-height: 1.3;
+  padding: 5px 8px 5px 12px;
+  text-decoration: none;
+}
+
+.nav-sections a:hover {
+  border-left-color: var(--secondary);
   color: var(--primary);
 }
 
@@ -232,7 +261,7 @@ a:hover {
   font-size: clamp(2.25rem, 7vw, 4.55rem);
   letter-spacing: 0;
   margin-top: 0;
-  max-width: 760px;
+  max-width: 860px;
 }
 
 .doc h2 {
@@ -260,7 +289,7 @@ a:hover {
 .doc > p:first-of-type {
   color: rgba(224, 230, 240, 0.88);
   font-size: clamp(1.08rem, 2vw, 1.22rem);
-  max-width: 760px;
+  max-width: 78ch;
 }
 
 .doc ul,
@@ -274,9 +303,9 @@ a:hover {
 
 .anchor {
   color: rgba(0, 212, 255, 0.42);
-  margin-left: -1.1em;
+  margin-left: 0;
   opacity: 0;
-  padding-right: 0.32em;
+  padding-right: 0.42em;
   text-decoration: none;
 }
 
@@ -294,6 +323,7 @@ a:hover {
   font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
   font-size: 0.88em;
   padding: 0.12em 0.34em;
+  white-space: nowrap;
 }
 
 .doc pre {
@@ -327,7 +357,8 @@ a:hover {
 
 .doc table {
   border-collapse: collapse;
-  min-width: 100%;
+  min-width: 760px;
+  width: 100%;
 }
 
 .doc th,
@@ -336,6 +367,24 @@ a:hover {
   padding: 11px 13px;
   text-align: left;
   vertical-align: top;
+}
+
+.doc td {
+  line-height: 1.45;
+}
+
+.doc th:first-child,
+.doc td:first-child {
+  width: 28%;
+}
+
+.doc td:first-child,
+.doc td:first-child code {
+  white-space: nowrap;
+}
+
+.doc td:last-child {
+  min-width: 34ch;
 }
 
 .doc th {
@@ -390,7 +439,7 @@ a:hover {
 .footer {
   border-top: 1px solid var(--line);
   margin: 0 auto;
-  max-width: 1440px;
+  max-width: 1640px;
   padding: 18px clamp(18px, 4vw, 48px) 34px;
 }
 
@@ -405,7 +454,7 @@ a:hover {
   font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
 }
 
-@media (max-width: 1120px) {
+@media (max-width: 1280px) {
   .shell {
     grid-template-columns: minmax(180px, 230px) minmax(0, 1fr);
   }
@@ -440,7 +489,7 @@ a:hover {
     position: static;
   }
 
-  .nav-group a small {
+  .nav-group > .nav-item > a small {
     display: none;
   }
 

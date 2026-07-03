@@ -43,11 +43,14 @@ stitch dump -i Security.evtx --raw
 ## JSON Shape
 
 `--format json` emits a JSON array of the same record objects used by JSONL.
-Use `--compact` for a single-line array or `--pretty` for a formatted array:
+JSON array output is pretty-formatted by default. Use `--compact` for a
+single-line array or `--pretty` to request formatted output explicitly:
 
 ```bash
 stitch dump -i Security.evtx --format json --pretty
 ```
+
+If both `--compact` and `--pretty` are supplied, pretty output wins.
 
 Projection and raw output use the same `--fields` and `--raw` flags as JSONL.
 
@@ -77,6 +80,8 @@ stitch dump -i Security.evtx --output security.jsonl
 
 When `--stats` is also supplied with `--output`, stats are printed to stdout and
 dump records are written to the output file.
+
+`--output` is treated as a file path. Parent directories must already exist.
 
 ## Memory Behavior
 
